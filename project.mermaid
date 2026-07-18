@@ -1,0 +1,415 @@
+# Voice Agent — Architecture Diagrams
+
+---
+
+## 1. High-Level System Architecture
+
+```mermaid
+flowchart TB
+    classDef telephony fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef gateway fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef stt fill:#fff3e0,stroke:#e65100,stroke-width:1.5px,color:#bf360c
+    classDef llm fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1.5px,color:#4a148c
+    classDef rag fill:#fce4ec,stroke:#c62828,stroke-width:1.5px,color:#b71c1c
+    classDef tts fill:#e0f7fa,stroke:#00695c,stroke-width:1.5px,color:#004d40
+    classDef storage fill:#f5f5f5,stroke:#616161,stroke-dasharray:5 5,color:#424242
+    classDef web fill:#fffde7,stroke:#f9a825,stroke-width:2px,color:#f57f17
+    classDef cloud fill:#eceff1,stroke:#455a64,stroke-width:2px,color:#263238
+    classDef queue fill:#fbe9e7,stroke:#d84315,stroke-width:1.5px,color:#bf360c
+
+    subgraph Callers ["Callers (100+ / day)"]
+        Caller1([Caller A — Hindi])
+        Caller2([Caller B — Gujarati])
+        Caller3([Caller C — English])
+    end
+    class Caller1,Caller2,Caller3 telephony
+
+    subgraph Telephony ["Telephony Layer"]
+        Provider["Telephony Provider\n(Twilio / Exotel / Plivo)"]
+        PhonePool["Phone Number Pool\n& Agent-Number Mapping"]
+        SIPGateway["SIP / WebSocket\nMedia Gateway"]
+    end
+    class Provider,PhonePool,SIPGateway gateway
+
+    subgraph Cloud ["Cloud Deployment (AWS / GCP)"]
+
+        subgraph Pipeline ["Voice Agent Pipeline"]
+            direction TB
+
+            subgraph STT_Layer ["STT — Multi-language"]
+                LangDetect["Language Detector\n(auto / caller-config)"]
+                WhisperLarge["faster-whisper\n(distil-large-v3)\nEN · HI · GU · 99+ langs"]
+            end
+            class LangDetect,WhisperLarge stt
+
+            subgraph LLM_Layer ["LLM + RAG Engine"]
+                LLMRouter["LLM Router"]
+                Qwen["Qwen 2.5 : 3B\n(via Ollama)"]
+                RAGAgent["RAG Agent\n(LangChain / LlamaIndex)"]
+                TransLayer["Response Translator\n(LLM-based EN→GU/HI)"]
+            end
+            class LLMRouter,Qwen,RAGAgent,TransLayer llm
+
+            subgraph TTS_Layer ["TTS — Multi-language"]
+                TTSRouter["TTS Router"]
+                Kokoro["Kokoro-82M\n(English)"]
+                ElevenLabs["ElevenLabs API\n(Hindi · Gujarati)"]
+            end
+            class TTSRouter,Kokoro,ElevenLabs tts
+        end
+
+        subgraph RAG_Infra ["RAG Infrastructure"]
+            VectorDB[("Vector Store\n(Qdrant / Pinecone /\nChromaDB)")]
+            Embeddings["Embedding Model\n(all-MiniLM /\nmultilingual-e5)"]
+            Chunker["Document Chunker\n& Preprocessor"]
+        end
+        class VectorDB,Embeddings,Chunker rag
+
+        subgraph WebApp ["Admin Web Dashboard"]
+            DocUpload["Document Upload\n(EN · GU PDFs, DOCX)"]
+            AgentConfig["Agent Config Panel\n(phone, voice, persona,\nlanguage)"]
+            Analytics["Call Analytics &\nTranscript Viewer"]
+            IngestionTrigger["Ingestion Trigger\n(webhook / on-upload)"]
+        end
+        class DocUpload,AgentConfig,Analytics,IngestionTrigger web
+
+        subgraph Infra ["Infrastructure"]
+            TaskQueue["Task Queue\n(Celery + Redis)"]
+            ObjStore[("Object Storage\n(S3 / GCS)")]
+            CallLogs[("Call Logs DB\n(PostgreSQL)")]
+            Cache["Response Cache\n(Redis)"]
+        end
+        class TaskQueue,ObjStore,CallLogs,Cache storage
+    end
+    class Cloud cloud
+
+    %% ===== Connections =====
+
+    Caller1 & Caller2 & Caller3 -- "PSTN / VoIP" --> Provider
+    Provider -- "Assign Number" --> PhonePool
+    Provider -- "Audio Stream" --> SIPGateway
+
+    SIPGateway -- "Raw Audio\n(16kHz PCM)" --> LangDetect
+    LangDetect -- "Detected Lang" --> WhisperLarge
+    WhisperLarge -- "Transcribed Text +\nLanguage Tag" --> LLMRouter
+
+    LLMRouter -- "Query + Context" --> RAGAgent
+    RAGAgent -- "Retrieve chunks" --> VectorDB
+    RAGAgent -- "Augmented prompt" --> Qwen
+    Qwen -- "EN response" --> TransLayer
+    TransLayer -- "GU/HI response\n(if needed)" --> TTSRouter
+
+    TTSRouter -- "English text" --> Kokoro
+    TTSRouter -- "Hindi/Gujarati text" --> ElevenLabs
+    Kokoro & ElevenLabs -- "Synthesized Audio" --> SIPGateway
+    SIPGateway -- "Audio Response" --> Provider
+
+    %% Document Ingestion
+    DocUpload -- "Upload files" --> ObjStore
+    DocUpload -- "Fire trigger" --> IngestionTrigger
+    IngestionTrigger -- "Enqueue job" --> TaskQueue
+    TaskQueue -- "Process" --> Chunker
+    Chunker -- "Text chunks" --> Embeddings
+    Embeddings -- "Vectors" --> VectorDB
+
+    %% Logging & Analytics
+    SIPGateway -. "Call metadata" .-> CallLogs
+    WhisperLarge -. "Transcripts" .-> CallLogs
+    Qwen -. "LLM responses" .-> CallLogs
+    CallLogs -. "Dashboard data" .-> Analytics
+```
+
+---
+
+## 2. Telephony & Phone Assignment Flow
+
+```mermaid
+flowchart LR
+    classDef admin fill:#fff8e1,stroke:#ff8f00,stroke-width:2px
+    classDef system fill:#e8eaf6,stroke:#283593,stroke-width:1.5px
+    classDef tel fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px
+
+    Admin([Admin User]):::admin
+    Dashboard["Web Dashboard"]:::admin
+
+    subgraph PhoneMgmt ["Phone Number Management"]
+        NumberPool[("Number Pool DB\n+91-XXXX-1\n+91-XXXX-2\n+91-XXXX-3")]
+        AgentMap["Agent ↔ Number\nMapping Table"]
+        ProviderAPI["Telephony Provider\nAPI (Twilio / Exotel)"]
+    end
+    class NumberPool,AgentMap,ProviderAPI system
+
+    subgraph CallRouting ["Inbound Call Routing"]
+        InboundCall(["Incoming Call\nto +91-XXXX-1"])
+        Lookup["Lookup Agent\nby Called Number"]
+        LoadConfig["Load Agent Config\n(persona, language,\nRAG collection)"]
+        SpawnSession["Spawn Voice\nPipeline Session"]
+    end
+    class InboundCall,Lookup,LoadConfig,SpawnSession tel
+
+    Admin -- "Configure agent" --> Dashboard
+    Dashboard -- "Assign phone number\nto agent" --> AgentMap
+    Dashboard -- "Buy / release\nnumber" --> ProviderAPI
+    ProviderAPI -- "Register number" --> NumberPool
+
+    InboundCall --> Lookup
+    Lookup -- "Query" --> AgentMap
+    AgentMap -- "Agent ID +\nconfig ref" --> LoadConfig
+    LoadConfig --> SpawnSession
+```
+
+---
+
+## 3. RAG Document Ingestion Pipeline
+
+```mermaid
+flowchart TB
+    classDef web fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:1.5px
+    classDef store fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px
+    classDef trigger fill:#ffccbc,stroke:#d84315,stroke-width:2px
+
+    Upload["Admin Uploads Document\n(PDF / DOCX / TXT)\n🌐 English or Gujarati"]:::web
+
+    subgraph Ingestion ["Async Ingestion Pipeline (Celery Worker)"]
+        direction TB
+        Detect["Detect Document\nLanguage (EN / GU)"]
+        Translate["Translate GU → EN\n(Google Translate API /\nLLM-based)"]
+        Parse["Parse & Extract Text\n(PyPDF2 / Unstructured)"]
+        Chunk["Chunk Text\n(RecursiveCharacterTextSplitter)\n~512 tokens, 50 overlap"]
+        Embed["Generate Embeddings\n(multilingual-e5-large /\nall-MiniLM-L6-v2)"]
+        Upsert["Upsert to Vector Store\nw/ metadata:\nlang, source_file,\nagent_id, chunk_id"]
+    end
+    class Detect,Translate,Parse,Chunk,Embed,Upsert process
+
+    VectorDB[("Vector Store\n(Qdrant / ChromaDB)")]:::store
+    ObjStore[("Object Storage\n(S3 / GCS)\nOriginal Files")]:::store
+    Webhook["Ingestion Trigger\n(POST /api/ingest)"]:::trigger
+
+    Upload -- "1. Store original" --> ObjStore
+    Upload -- "2. Fire webhook" --> Webhook
+    Webhook -- "3. Enqueue task" --> Detect
+    Detect -- "EN doc" --> Parse
+    Detect -- "GU doc" --> Translate
+    Translate -- "EN text" --> Parse
+    Parse --> Chunk
+    Chunk --> Embed
+    Embed -- "4. Store vectors" --> Upsert
+    Upsert --> VectorDB
+```
+
+---
+
+## 4. Multi-Language Call Processing — Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Caller (Hindi/Gujarati)
+    participant Tel as Telephony Gateway
+    participant STT as STT (faster-whisper)
+    participant RAG as RAG Agent
+    participant VDB as Vector Store
+    participant LLM as LLM (Qwen 2.5:3B)
+    participant Trans as Translator
+    participant TTS as TTS Router
+
+    rect rgb(232, 245, 233)
+        Note over Caller, Tel: Phase 1 — Call Setup
+        Caller->>Tel: Inbound call to assigned number
+        Tel->>Tel: Lookup agent config by phone number
+        Tel->>Tel: Load persona, language pref, RAG collection
+        Tel-->>Caller: Answer call, start audio stream
+    end
+
+    rect rgb(227, 242, 253)
+        Note over Tel, STT: Phase 2 — Speech Recognition
+        Tel->>STT: Stream raw audio (16kHz PCM)
+        STT->>STT: Auto-detect language (HI/GU/EN)
+        STT->>STT: Transcribe with distil-large-v3
+        STT-->>RAG: Transcribed text + language tag
+    end
+
+    rect rgb(243, 229, 245)
+        Note over RAG, LLM: Phase 3 — RAG-Augmented Response
+        RAG->>RAG: Translate query to EN (if HI/GU)
+        RAG->>VDB: Semantic search (EN query embedding)
+        VDB-->>RAG: Top-K relevant chunks + metadata
+        RAG->>LLM: Augmented prompt = system_prompt + chunks + query
+        LLM-->>RAG: Stream EN response tokens
+    end
+
+    rect rgb(224, 247, 250)
+        Note over Trans, TTS: Phase 4 — Translation & Speech Synthesis
+        RAG->>Trans: EN response text
+        Trans->>Trans: Translate EN → HI or GU (based on caller lang)
+        Trans-->>TTS: Translated response text + lang tag
+
+        alt Language = English
+            TTS->>TTS: Route to Kokoro-82M
+        else Language = Hindi or Gujarati
+            TTS->>TTS: Route to ElevenLabs API
+        end
+
+        TTS-->>Tel: Synthesized audio stream
+        Tel-->>Caller: Play audio response
+    end
+
+    rect rgb(255, 243, 224)
+        Note over Caller, LLM: Loop continues until call ends
+        Caller->>Tel: Next utterance...
+        Note right of Tel: Repeat Phase 2→4
+    end
+```
+
+---
+
+## 5. Cloud Deployment Architecture
+
+```mermaid
+flowchart TB
+    classDef lb fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    classDef compute fill:#bbdefb,stroke:#1565c0,stroke-width:1.5px
+    classDef gpu fill:#d1c4e9,stroke:#4527a0,stroke-width:2px
+    classDef db fill:#f5f5f5,stroke:#616161,stroke-dasharray:5 5
+    classDef ext fill:#ffecb3,stroke:#ff8f00,stroke-width:1.5px
+    classDef monitor fill:#ffcdd2,stroke:#c62828,stroke-width:1.5px
+
+    Internet(["Callers\n(PSTN / VoIP)"])
+
+    subgraph Cloud ["Cloud Region (AWS / GCP)"]
+
+        LB["Load Balancer\n(ALB / Cloud LB)"]:::lb
+
+        subgraph Workers ["Auto-Scaling Worker Pool"]
+            W1["Worker 1\n(Voice Pipeline)"]
+            W2["Worker 2\n(Voice Pipeline)"]
+            W3["Worker N\n(Voice Pipeline)"]
+        end
+        class W1,W2,W3 compute
+
+        subgraph GPU ["GPU Instance(s)"]
+            OllamaServer["Ollama Server\n(Qwen 2.5:3B)"]
+            WhisperServer["Whisper Server\n(distil-large-v3)"]
+        end
+        class OllamaServer,WhisperServer gpu
+
+        subgraph Datastores ["Managed Data Stores"]
+            Postgres[("PostgreSQL\n(call logs, agent config,\nphone mappings)")]
+            Redis[("Redis\n(task queue, cache,\nsession state)")]
+            VectorDB[("Qdrant / Pinecone\n(RAG vectors)")]
+            S3[("S3 / GCS\n(documents,\ncall recordings)")]
+        end
+        class Postgres,Redis,VectorDB,S3 db
+
+        subgraph WebDash ["Web Dashboard (Container)"]
+            Frontend["Frontend\n(Next.js / React)"]
+            BackendAPI["Backend API\n(FastAPI)"]
+        end
+        class Frontend,BackendAPI compute
+
+        subgraph Monitoring ["Observability Stack"]
+            Prometheus["Prometheus +\nGrafana"]
+            Logging["Centralized Logging\n(ELK / CloudWatch)"]
+            Alerts["Alerting\n(PagerDuty / Slack)"]
+        end
+        class Prometheus,Logging,Alerts monitor
+
+    end
+
+    subgraph External ["External Services"]
+        Twilio["Twilio / Exotel\n(Telephony)"]
+        EL["ElevenLabs\n(TTS API)"]
+        GTranslate["Google Translate\n(Fallback)"]
+    end
+    class Twilio,EL,GTranslate ext
+
+    Internet -- "Inbound calls" --> Twilio
+    Twilio -- "SIP / WebSocket" --> LB
+    LB --> W1 & W2 & W3
+    W1 & W2 & W3 -- "STT inference" --> WhisperServer
+    W1 & W2 & W3 -- "LLM inference" --> OllamaServer
+    W1 & W2 & W3 -- "TTS (HI/GU)" --> EL
+    W1 & W2 & W3 -- "RAG queries" --> VectorDB
+    W1 & W2 & W3 -. "Logs & metrics" .-> Prometheus & Logging
+    BackendAPI --> Postgres & Redis & VectorDB & S3
+    Frontend --> BackendAPI
+    Prometheus -. "Alerts" .-> Alerts
+```
+
+---
+
+## 6. Admin Dashboard — Feature Map
+
+```mermaid
+flowchart LR
+    classDef page fill:#e8eaf6,stroke:#283593,stroke-width:1.5px
+    classDef action fill:#fff3e0,stroke:#e65100,stroke-width:1.5px
+    classDef data fill:#f1f8e9,stroke:#33691e,stroke-width:1.5px
+
+    subgraph Dashboard ["Admin Web Dashboard"]
+        direction TB
+
+        subgraph AgentMgmt ["Agent Management"]
+            CreateAgent["Create Agent\n(name, persona prompt)"]
+            AssignPhone["Assign Phone Number"]
+            SetLang["Set Supported\nLanguages"]
+            SetVoice["Select Voice\n(Kokoro / ElevenLabs preset)"]
+            SetRAG["Link RAG Collection"]
+        end
+        class CreateAgent,AssignPhone,SetLang,SetVoice,SetRAG page
+
+        subgraph DocMgmt ["Document Management"]
+            UploadDoc["Upload Documents\n(PDF, DOCX, TXT)"]
+            ViewDocs["View Indexed\nDocuments"]
+            DeleteDoc["Delete / Re-index\nDocument"]
+            IngestionStatus["Ingestion Status\n& Progress"]
+        end
+        class UploadDoc,ViewDocs,DeleteDoc,IngestionStatus action
+
+        subgraph CallAnalytics ["Call Analytics"]
+            CallHistory["Call History\n& Recordings"]
+            Transcripts["Full Transcripts\n(with lang tags)"]
+            Dispositions["Call Dispositions\n& Outcomes"]
+            Metrics["Metrics Dashboard\n(calls/day, avg duration,\nlang distribution)"]
+        end
+        class CallHistory,Transcripts,Dispositions,Metrics data
+    end
+```
+
+---
+
+## 7. Current State vs. Target State
+
+```mermaid
+flowchart LR
+    classDef current fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+    classDef target fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    classDef arrow fill:none,stroke:none
+
+    subgraph Current ["🔴 Current MVP"]
+        direction TB
+        C1["Push-to-talk\n(local mic)"]
+        C2["faster-whisper\nsmall.en (English only)"]
+        C3["Ollama Qwen 2.5:3B\n(no RAG, no context)"]
+        C4["Kokoro TTS\n(English only)"]
+        C5["Local execution\n(single user)"]
+    end
+    class C1,C2,C3,C4,C5 current
+
+    subgraph Target ["🟢 Target Production"]
+        direction TB
+        T1["Telephony (Twilio/Exotel)\nAuto phone assignment"]
+        T2["faster-whisper distil-large-v3\nEN + HI + GU + 99 langs"]
+        T3["Qwen 2.5:3B + RAG Agent\nDomain-aligned, multi-lang\nresponse translation"]
+        T4["Kokoro (EN) +\nElevenLabs (HI/GU)"]
+        T5["Cloud deploy (AWS/GCP)\n100+ calls/day, auto-scale"]
+    end
+    class T1,T2,T3,T4,T5 target
+
+    C1 -- "➜" --> T1
+    C2 -- "➜" --> T2
+    C3 -- "➜" --> T3
+    C4 -- "➜" --> T4
+    C5 -- "➜" --> T5
+```
