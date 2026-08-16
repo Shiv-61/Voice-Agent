@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>University Voice Agent & AI Knowledge Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- Ambient background glow elements -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+
+  <div class="app-container">
+    <!-- Header Navigation -->
+    <header class="app-header glass-panel">
+      <div class="header-brand">
+        <div class="brand-icon-wrapper">
+          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+            <line x1="12" y1="19" x2="12" y2="22"></line>
+            <line x1="8" y1="22" x2="16" y2="22"></line>
+          </svg>
+          <span class="pulse-ring"></span>
+        </div>
+        <div>
+          <h1 class="brand-title">UniVoice <span class="gradient-text">AI Desk</span></h1>
+          <p class="brand-subtitle">Multilingual Voice Agent & Document Intelligence</p>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <nav class="nav-tabs">
+        <button class="tab-btn active" data-tab="voice">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          </svg>
+          Voice Call
+        </button>
+        <button class="tab-btn" data-tab="rag">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+          PDF Knowledge Base
+        </button>
+        <button class="tab-btn" data-tab="database">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+          </svg>
+          University Database
+        </button>
+        <button class="tab-btn" data-tab="diagnostics">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+          </svg>
+          System Health
+        </button>
+      </nav>
+
+      <!-- Language & Connection Status -->
+      <div class="header-controls">
+        <div class="language-picker">
+          <span class="lang-label">Lang:</span>
+          <select id="languageSelect" class="lang-select">
+            <option value="en-IN">English (India)</option>
+            <option value="hi-IN">हिंदी (Hindi)</option>
+            <option value="gu-IN">ગુજરાતી (Gujarati)</option>
+          </select>
+        </div>
+        <div class="status-indicator" id="wsStatusBadge">
+          <span class="status-dot"></span>
+          <span class="status-text">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="app-main">
+
+      <!-- ================================================================ -->
+      <!-- TAB 1: LIVE VOICE ASSISTANT -->
+      <!-- ================================================================ -->
+      <section id="tab-voice" class="tab-pane active">
+        <div class="voice-grid">
+          <!-- Voice Interaction Stage -->
+          <div class="voice-stage glass-panel">
+            <div class="stage-header">
+              <span class="badge badge-accent">Live Voice Call Session</span>
+              <span id="callDuration" class="call-timer">00:00</span>
+            </div>
+
+            <!-- Glowing Visualizer Canvas -->
+            <div class="visualizer-container">
+              <canvas id="waveformCanvas" width="560" height="180"></canvas>
+              <div class="orb-container">
+                <div class="audio-orb" id="micOrb">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="orb-icon">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="22"></line>
+                    <line x1="8" y1="22" x2="16" y2="22"></line>
+                  </svg>
+                </div>
+                <div class="ripple ripple-1"></div>
+                <div class="ripple ripple-2"></div>
+                <div class="ripple ripple-3"></div>
+              </div>
+            </div>
+
+            <!-- Real-time Agent State Text -->
+            <div class="stage-state">
+              <p id="agentStateText" class="state-text">Ready. Press Start Call or hold the button to speak.</p>
+            </div>
+
+            <!-- Call Controls -->
+            <div class="stage-controls">
+              <button id="startCallBtn" class="btn btn-primary btn-glow">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                </svg>
+                <span>Start Voice Call</span>
+              </button>
+
+              <button id="pushToTalkBtn" class="btn btn-secondary" disabled>
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                </svg>
+                <span>Push to Talk (Hold)</span>
+              </button>
+            </div>
+
+            <!-- Suggested Inquiry Chips -->
+            <div class="suggested-queries">
+              <span class="chips-label">Try Asking:</span>
+              <div class="chips-wrapper">
+                <button class="chip-btn" data-query="What is the placement percentage and highest package for CSE?">💼 CSE Placements</button>
+                <button class="chip-btn" data-query="आरव पटेल के मार्क्स और अटेंडेंस क्या है?">🎓 Aarav Patel Marks (Hindi)</button>
+                <button class="chip-btn" data-query="What are the hostel curfew and leave rules?">🏢 Hostel Rules (RAG)</button>
+                <button class="chip-btn" data-query="B.Tech Computer Science ની ફી અને eligibility શું છે?">📋 Admission Fees (Gujarati)</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Conversation Transcript Stream -->
+          <div class="transcript-panel glass-panel">
+            <div class="panel-header">
+              <div class="panel-title-wrap">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <h2>Live Conversation Transcript</h2>
+              </div>
+              <button id="clearChatBtn" class="btn-icon" title="Clear History">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+              </button>
+            </div>
+
+            <div class="messages-container" id="messagesContainer">
+              <div class="message-bubble agent-bubble greeting">
+                <div class="bubble-header">
+                  <span class="speaker-name">🎓 UniVoice Assistant</span>
+                  <span class="speaker-time">Just now</span>
+                </div>
+                <div class="bubble-content">
+                  Hello! I am your University Voice Assistant. You can ask me about admissions, fees, placements, student marks/attendance, or uploaded campus policy documents in English, Hindi, or Gujarati.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================ -->
+      <!-- TAB 2: PDF KNOWLEDGE BASE (RAG) -->
+      <!-- ================================================================ -->
+      <section id="tab-rag" class="tab-pane">
+        <div class="rag-layout">
+          <!-- Left: Upload Box & Tester -->
+          <div class="rag-sidebar">
+            <!-- Drag & Drop Upload Zone -->
+            <div class="upload-card glass-panel">
+              <h2 class="card-title">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Upload University PDF
+              </h2>
+              <p class="card-desc">Upload prospectuses, hostel rulebooks, scholarship guidelines, or syllabus PDFs to index into ChromaDB vector store.</p>
+
+              <div class="dropzone" id="pdfDropzone">
+                <input type="file" id="pdfFileInput" accept=".pdf" hidden />
+                <div class="dropzone-inner">
+                  <div class="upload-icon-circle">
+                    <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                    </svg>
+                  </div>
+                  <p class="dropzone-prompt"><strong>Drag & Drop PDF here</strong> or <span class="browse-link">Browse Files</span></p>
+                  <span class="file-limits">Supports PDF format (up to 50MB)</span>
+                </div>
+
+                <div class="upload-progress-container" id="uploadProgressContainer" style="display: none;">
+                  <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="uploadProgressBar"></div>
+                  </div>
+                  <span class="progress-text" id="uploadProgressText">Processing & Chunking PDF...</span>
+                </div>
+              </div>
+
+              <div id="uploadFeedback" class="upload-feedback" style="display: none;"></div>
+            </div>
+
+            <!-- Semantic Search Test Console -->
+            <div class="search-test-card glass-panel">
+              <h2 class="card-title">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                RAG Vector Search Tester
+              </h2>
+              <p class="card-desc">Test semantic similarity retrieval across all uploaded document embeddings.</p>
+
+              <div class="search-input-group">
+                <input type="text" id="ragSearchInput" placeholder="e.g. What is the scholarship eligibility criteria?" class="form-input" />
+                <button id="ragSearchBtn" class="btn btn-primary">Search</button>
+              </div>
+
+              <div class="search-results-list" id="ragSearchResults">
+                <div class="empty-state-text">Enter a query above to inspect retrieved context chunks.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Document Catalog Grid -->
+          <div class="rag-main glass-panel">
+            <div class="panel-header">
+              <div class="panel-title-wrap">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                </svg>
+                <h2>Indexed Document Knowledge Catalog</h2>
+              </div>
+              <button id="refreshDocsBtn" class="btn-icon" title="Refresh List">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="23 4 23 10 17 10"></polyline>
+                  <polyline points="1 20 1 14 7 14"></polyline>
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                </svg>
+              </button>
+            </div>
+
+            <div class="documents-table-wrapper">
+              <table class="data-table" id="documentsTable">
+                <thead>
+                  <tr>
+                    <th>Document Name</th>
+                    <th>Uploaded Date</th>
+                    <th>Pages</th>
+                    <th>Indexed Chunks</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="documentsTableBody">
+                  <tr>
+                    <td colspan="5" class="loading-cell">Loading document catalog...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================ -->
+      <!-- TAB 3: UNIVERSITY DATABASE EXPLORER -->
+      <!-- ================================================================ -->
+      <section id="tab-database" class="tab-pane">
+        <!-- Dashboard Metric Highlights -->
+        <div class="metrics-row">
+          <div class="metric-card glass-panel">
+            <div class="metric-icon-wrap icon-cyan">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+            </div>
+            <div class="metric-content">
+              <span class="metric-label">Enrolled Students</span>
+              <h3 class="metric-val" id="metricStudents">--</h3>
+            </div>
+          </div>
+
+          <div class="metric-card glass-panel">
+            <div class="metric-icon-wrap icon-purple">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 10v6M2 10l10-5 10 5-10 5z"></path>
+                <path d="M6 12v5c3 3 9 3 12 0v-5"></path>
+              </svg>
+            </div>
+            <div class="metric-content">
+              <span class="metric-label">Admission Programs</span>
+              <h3 class="metric-val" id="metricPrograms">--</h3>
+            </div>
+          </div>
+
+          <div class="metric-card glass-panel">
+            <div class="metric-icon-wrap icon-emerald">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="1" x2="12" y2="23"></line>
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+              </svg>
+            </div>
+            <div class="metric-content">
+              <span class="metric-label">Placement Packages</span>
+              <h3 class="metric-val" id="metricPlacements">--</h3>
+            </div>
+          </div>
+
+          <div class="metric-card glass-panel">
+            <div class="metric-icon-wrap icon-orange">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+            </div>
+            <div class="metric-content">
+              <span class="metric-label">Indexed RAG Chunks</span>
+              <h3 class="metric-val" id="metricChunks">--</h3>
+            </div>
+          </div>
+        </div>
+
+        <!-- Database Tables Explorer -->
+        <div class="db-tables-grid">
+          <!-- Student Records -->
+          <div class="db-section glass-panel">
+            <div class="panel-header">
+              <div class="panel-title-wrap">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+                <h2>Student Directory & Academic Records</h2>
+              </div>
+            </div>
+            <div class="data-table-wrapper">
+              <table class="data-table" id="studentsTable">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Student Name</th>
+                    <th>Department</th>
+                    <th>Semester</th>
+                    <th>Marks & Attendance</th>
+                  </tr>
+                </thead>
+                <tbody id="studentsTableBody">
+                  <tr><td colspan="5" class="loading-cell">Loading students...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Placements & Admissions -->
+          <div class="db-sub-grid">
+            <div class="db-section glass-panel">
+              <div class="panel-header">
+                <h2>Campus Placements Stats</h2>
+              </div>
+              <div class="data-table-wrapper">
+                <table class="data-table" id="placementsTable">
+                  <thead>
+                    <tr>
+                      <th>Dept</th>
+                      <th>Highest (LPA)</th>
+                      <th>Avg (LPA)</th>
+                      <th>Placement %</th>
+                    </tr>
+                  </thead>
+                  <tbody id="placementsTableBody">
+                    <tr><td colspan="4" class="loading-cell">Loading placements...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="db-section glass-panel">
+              <div class="panel-header">
+                <h2>Admission Programs & Deadlines</h2>
+              </div>
+              <div class="data-table-wrapper">
+                <table class="data-table" id="admissionsTable">
+                  <thead>
+                    <tr>
+                      <th>Program</th>
+                      <th>Fee / Year</th>
+                      <th>Last Date</th>
+                    </tr>
+                  </thead>
+                  <tbody id="admissionsTableBody">
+                    <tr><td colspan="3" class="loading-cell">Loading admissions...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================ -->
+      <!-- TAB 4: SYSTEM DIAGNOSTICS -->
+      <!-- ================================================================ -->
+      <section id="tab-diagnostics" class="tab-pane">
+        <div class="diagnostics-grid">
+          <div class="diag-card glass-panel">
+            <div class="diag-header">
+              <div class="diag-icon icon-purple">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                </svg>
+              </div>
+              <div>
+                <h3>LLM Engine</h3>
+                <span class="diag-provider">Ollama Local Instance</span>
+              </div>
+              <span class="status-pill pill-green" id="diagLlmStatus">Checking...</span>
+            </div>
+            <div class="diag-details">
+              <div class="diag-row"><span>Active Model:</span><strong id="diagLlmModel">qwen2.5:3b</strong></div>
+              <div class="diag-row"><span>Tool Calling:</span><strong>Active (SQL + RAG)</strong></div>
+              <div class="diag-row"><span>Prompt Strategy:</span><strong>Voice-Optimized Spoken Text</strong></div>
+            </div>
+          </div>
+
+          <div class="diag-card glass-panel">
+            <div class="diag-header">
+              <div class="diag-icon icon-cyan">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                </svg>
+              </div>
+              <div>
+                <h3>Sarvam AI Voice Suite</h3>
+                <span class="diag-provider">STT & TTS API</span>
+              </div>
+              <span class="status-pill pill-green" id="diagSarvamStatus">Checking...</span>
+            </div>
+            <div class="diag-details">
+              <div class="diag-row"><span>STT Model:</span><strong id="diagSttModel">saaras:v3</strong></div>
+              <div class="diag-row"><span>TTS Model:</span><strong id="diagTtsModel">bulbul:v3 (anushka)</strong></div>
+              <div class="diag-row"><span>Languages:</span><strong>English, Hindi, Gujarati</strong></div>
+            </div>
+          </div>
+
+          <div class="diag-card glass-panel">
+            <div class="diag-header">
+              <div class="diag-icon icon-emerald">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                  <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                  <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                </svg>
+              </div>
+              <div>
+                <h3>Relational Database</h3>
+                <span class="diag-provider">PostgreSQL / SQLite</span>
+              </div>
+              <span class="status-pill pill-green" id="diagDbStatus">Connected</span>
+            </div>
+            <div class="diag-details">
+              <div class="diag-row"><span>Database Mode:</span><strong id="diagDbMode">Postgres / SQLite</strong></div>
+              <div class="diag-row"><span>Auto Failover:</span><strong>Enabled</strong></div>
+              <div class="diag-row"><span>Tables Managed:</span><strong>6 Entities (Marks, Attendance, etc.)</strong></div>
+            </div>
+          </div>
+
+          <div class="diag-card glass-panel">
+            <div class="diag-header">
+              <div class="diag-icon icon-orange">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                </svg>
+              </div>
+              <div>
+                <h3>Vector Knowledge Base</h3>
+                <span class="diag-provider">ChromaDB Persistent Store</span>
+              </div>
+              <span class="status-pill pill-green" id="diagRagStatus">Ready</span>
+            </div>
+            <div class="diag-details">
+              <div class="diag-row"><span>Indexed Chunks:</span><strong id="diagRagChunks">0</strong></div>
+              <div class="diag-row"><span>Parser:</span><strong>PyPDF Multi-page Extractor</strong></div>
+              <div class="diag-row"><span>Similarity Metric:</span><strong>Cosine Embedding Distance</strong></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

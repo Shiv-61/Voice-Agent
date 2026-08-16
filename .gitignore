@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+.env
+
+# Local Databases & Vector Stores
+db/university.db
+db/chroma_db/
+*.db
+*.sqlite3
+
+# Cache & system files
+.cache/
+.DS_Store
