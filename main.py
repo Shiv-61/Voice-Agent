@@ -1,30 +1,30 @@
 """
-MVP voice call agent: STT -> LLM -> TTS, all local, all free.
+University Admission & Student Info Voice Call Agent.
 
-Loop:
-  1. Push-to-talk record the caller's voice.
-  2. Transcribe with faster-whisper.
-  3. Stream a reply from a local LLM (Ollama).
-  4. As soon as each sentence of the reply is complete, synthesize and
-     play it with Kokoro — so the agent starts talking before it has
-     finished "thinking" the whole reply, which is what makes it feel
-     like a real conversation instead of a request/response bot.
+Pipeline:
+  1. STT (Sarvam) -> Multi-lingual Speech-to-Text (English, Hindi, Gujarati)
+  2. LLM (Qwen 2.5 via Ollama) -> Context-aware, tri-lingual agent with PostgreSQL/SQLite DB tool calls
+  3. TTS (Sarvam) -> Natural multi-lingual Speech Synthesis
+
+Modes:
+  - WebSocket Server (default): `python main.py` -> Runs WebSocket Media Server on ws://0.0.0.0:8765
+  - Interactive CLI Mode: `python main.py --cli` -> Push-to-talk mic & speaker test in terminal
 """
 
+import argparse
+import asyncio
 import re
+import sys
 
 from stt import STT
 from llm import LLM
 from tts import TTS
+from ws.server import start_websocket_server
 
-SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
 
 
 def split_ready_sentences(buffer: str):
-    """
-    Given the text accumulated so far, split off any complete sentences
-    and return (list_of_complete_sentences, remaining_incomplete_buffer).
-    """
     parts = SENTENCE_END.split(buffer)
     if len(parts) <= 1:
         return [], buffer
@@ -32,41 +32,90 @@ def split_ready_sentences(buffer: str):
     return complete, remainder
 
 
-def main():
+def run_cli_mode():
+    """Interactive local Push-to-talk CLI mode."""
+    import sounddevice as sd
+
     stt = STT()
     llm = LLM()
     tts = TTS()
 
-    print("\n✅ Voice agent ready. Ctrl+C to quit.\n")
+    print("\n🎓 University Admission Voice Agent (CLI Mode) Ready.")
+    print("Supports queries in English, Hindi, and Gujarati.")
+    print("Press Ctrl+C to exit.\n")
+
+    current_language = "en-IN"
 
     try:
         while True:
-            audio = stt.record()
-            print("⏳ Transcribing...")
-            user_text = stt.transcribe(audio)
+            input("🎙️ Press Enter to start speaking...")
+            print("🔴 Recording... Press Enter again to stop.")
+
+            frames = []
+
+            def callback(indata, frame_count, time_info, status):
+                frames.append(indata.copy())
+
+            stream = sd.InputStream(
+                samplerate=16000, channels=1, dtype="float32", callback=callback
+            )
+            with stream:
+                input()
+
+            import numpy as np
+            if not frames:
+                print("(didn't catch anything, try again)")
+                continue
+
+            audio_np = np.concatenate(frames, axis=0).flatten()
+            audio_bytes = stt.numpy_to_wav_bytes(audio_np, sample_rate=16000)
+
+            print("⏳ Transcribing with Sarvam...")
+            user_text, detected_lang = stt.transcribe(
+                audio_bytes, language_code="unknown"
+            )
 
             if not user_text:
                 print("(didn't catch anything, try again)")
                 continue
 
-            print(f"🧑 You said: {user_text}")
+            current_language = detected_lang or current_language
+            print(f"🧑 User [{current_language}]: {user_text}")
             print("🤖 Agent: ", end="", flush=True)
 
             buffer = ""
             for piece in llm.reply_stream(user_text):
                 print(piece, end="", flush=True)
                 buffer += piece
-                ready, buffer = split_ready_sentences(buffer)
-                for sentence in ready:
-                    tts.speak(sentence)
+                ready_sentences, buffer = split_ready_sentences(buffer)
+
+                for sentence in ready_sentences:
+                    tts.speak_local(sentence, language_code=current_language)
 
             if buffer.strip():
-                tts.speak(buffer)
+                tts.speak_local(buffer.strip(), language_code=current_language)
 
-            print()  # newline after the printed reply
+            print("\n")
 
     except KeyboardInterrupt:
         print("\n👋 Call ended.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="University Admission & Student Info Voice Call Agent"
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Run in local interactive push-to-talk terminal mode",
+    )
+    args = parser.parse_args()
+
+    if args.cli:
+        run_cli_mode()
+    else:
+        asyncio.run(start_websocket_server())
 
 
 if __name__ == "__main__":

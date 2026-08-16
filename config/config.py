@@ -1,24 +1,52 @@
 """
-All the knobs in one place. Tune these before touching the pipeline code.
+All configuration knobs in one place.
+
+Environment variables:
+    SARVAM_API_KEY  — Sarvam AI API subscription key (required for STT & TTS)
+    DATABASE_URL    — PostgreSQL connection string (default: localhost)
 """
 
-# ---- STT (faster-whisper) ----
-# "small.en" = good accuracy/speed balance on CPU, English-only, ~250MB.
-# Bump to "distil-large-v3" if you have a GPU and want higher accuracy.
-STT_MODEL_SIZE = "small.en"
-STT_DEVICE = "cpu"          # "cuda" if you have an NVIDIA GPU
-STT_COMPUTE_TYPE = "int8"   # int8 = fastest on CPU, small quality tradeoff
-SAMPLE_RATE = 16000          # Whisper expects 16kHz mono
+import os
+
+# ---- Sarvam AI (STT + TTS) ----
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_xc0xbbkb_xTxOQkUEFOY8iwucsJOgPWIA")
+
+# STT
+STT_MODEL = "saaras:v3"
+STT_MODE = "transcribe"              # transcribe | translate | verbatim
+
+# TTS
+TTS_MODEL = "bulbul:v3"
+TTS_SPEAKER = "anushka"              # see Sarvam docs for available speakers
+TTS_SPEED = 1.0
+
+# ---- Language ----
+# BCP-47 codes used by Sarvam
+SUPPORTED_LANGUAGES = {
+    "en": "en-IN",
+    "hi": "hi-IN",
+    "gu": "gu-IN",
+}
+DEFAULT_LANGUAGE = "en"               # fallback language code
 
 # ---- LLM (Ollama, local) ----
 OLLAMA_URL = "http://localhost:11434/api/chat"
-LLM_MODEL = "qwen2.5:3b"   # swap to "llama3.2:3b" if preferred
-LLM_MAX_TOKENS = 120          # keeps replies short -> keeps latency + cost down
-LLM_TEMPERATURE = 0.7
-
-# ---- TTS (Kokoro) ----
-TTS_VOICE = "af_heart"   # one of Kokoro's built-in voice presets
-TTS_SPEED = 1.0
+LLM_MODEL = "qwen2.5:3b"
+LLM_MAX_TOKENS = 250                 # more room for tool-call reasoning
+LLM_TEMPERATURE = 0.4                # lower for factual accuracy
 
 # ---- Conversation ----
-MAX_HISTORY_TURNS = 8   # how many past turns to keep in context (cost control)
+MAX_HISTORY_TURNS = 8
+
+# ---- PostgreSQL ----
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/university_agent",
+)
+
+# ---- WebSocket Server ----
+WS_HOST = "0.0.0.0"
+WS_PORT = 8765
+
+# ---- Audio ----
+SAMPLE_RATE = 16000                   # Sarvam expects 16kHz for PCM

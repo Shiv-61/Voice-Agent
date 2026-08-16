@@ -1,63 +1,81 @@
 """
-Speech-to-text: push-to-talk recording + faster-whisper transcription.
+Speech-to-text via Sarvam AI.
 
-Push-to-talk (press Enter to start/stop) is the simplest thing that works
-for an MVP. It avoids the extra complexity of voice-activity-detection
-(VAD) tuning while you're still validating the STT -> LLM -> TTS pipeline
-itself. Swap in VAD later for a true hands-free feel.
+Accepts raw audio bytes (WAV or PCM-16kHz), sends them to the Sarvam
+STT API, and returns the transcript along with the detected language.
 """
 
+import io
+import wave
+
 import numpy as np
-import sounddevice as sd
-from faster_whisper import WhisperModel
+from sarvamai import SarvamAI
 
 import config
 
 
 class STT:
     def __init__(self):
-        print(f"[stt] loading faster-whisper '{config.STT_MODEL_SIZE}' "
-              f"({config.STT_DEVICE}/{config.STT_COMPUTE_TYPE})...")
-        self.model = WhisperModel(
-            config.STT_MODEL_SIZE,
-            device=config.STT_DEVICE,
-            compute_type=config.STT_COMPUTE_TYPE,
+        if not config.SARVAM_API_KEY:
+            raise RuntimeError(
+                "SARVAM_API_KEY is not set. "
+                "Export it as an environment variable before running."
+            )
+        self.client = SarvamAI(api_subscription_key=config.SARVAM_API_KEY)
+        print("[stt] Sarvam STT client ready.")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def transcribe(
+        self,
+        audio_bytes: bytes,
+        language_code: str | None = None,
+    ) -> tuple[str, str]:
+        """
+        Transcribe audio bytes to text.
+
+        Parameters
+        ----------
+        audio_bytes : bytes
+            Raw audio in WAV format (16-bit PCM, 16 kHz, mono).
+        language_code : str | None
+            BCP-47 language code (e.g. "hi-IN"). Pass ``None`` or
+            ``"unknown"`` to let Sarvam auto-detect.
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(transcript, detected_language_code)``
+            e.g. ``("What are the placements like?", "en-IN")``
+        """
+        lang = language_code or "unknown"
+
+        response = self.client.speech_to_text.transcribe(
+            file=audio_bytes,
+            model=config.STT_MODEL,
+            mode=config.STT_MODE,
+            language_code=lang,
         )
-        print("[stt] ready.")
 
-    def record(self) -> np.ndarray:
-        """Record from the default mic between two Enter presses."""
-        input("\n🎙️  Press Enter to start speaking...")
-        print("🔴 Recording... press Enter again to stop.")
+        transcript = response.transcript.strip()
+        detected_lang = response.language_code or lang
 
-        frames = []
+        return transcript, detected_lang
 
-        def callback(indata, frame_count, time_info, status):
-            frames.append(indata.copy())
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
-        stream = sd.InputStream(
-            samplerate=config.SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            callback=callback,
-        )
-        with stream:
-            input()  # blocks until Enter is pressed again
-
-        if not frames:
-            return np.zeros(0, dtype=np.float32)
-
-        audio = np.concatenate(frames, axis=0).flatten()
-        return audio
-
-    def transcribe(self, audio: np.ndarray) -> str:
-        if audio.size == 0:
-            return ""
-        segments, _info = self.model.transcribe(
-            audio,
-            language="en",
-            vad_filter=True,        # trims leading/trailing silence, cuts hallucination
-            beam_size=1,             # greedy decoding = fastest, fine for short utterances
-        )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
-        return text
+    @staticmethod
+    def numpy_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
+        """Convert a float32 numpy array to WAV bytes (16-bit PCM)."""
+        pcm = (audio * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm.tobytes())
+        return buf.getvalue()

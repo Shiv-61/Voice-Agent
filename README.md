@@ -1,206 +1,204 @@
-# MVP Voice Call Agent
+# 🎓 University Admission & Student Info Voice Agent
 
-A lightweight, fully local, free voice call agent pipeline using **STT ➔ LLM ➔ TTS** with real-time streaming:
-1. **STT (Speech-to-Text)**: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (utilizing Whisper model variants)
-2. **LLM (Language Model)**: Local [Ollama](https://ollama.com/) instance (e.g., `qwen2.5:3b` or `llama3.2:3b`)
-3. **TTS (Text-to-Speech)**: [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) via `kokoro` (highly efficient and human-like voice synthesis)
+A multi-lingual voice call agent for university admission inquiries and student academic assistance. Parents and prospective students call over **WebSockets** to ask about:
+- **Admission Process, Eligibility, Fees, & Deadlines**
+- **University Achievements & Department Placements**
+- **Student Academic Marks & Subject-wise Attendance** (via database tool calling)
 
-The core orchestrator splits the LLM stream into sentences on-the-fly and plays them immediately, minimizing conversation latency.
+The agent speaks naturally in **English, Hindi, and Gujarati**.
 
 ---
 
-## 🏗️ Architecture & Interaction Flow
+## 🏗️ System Architecture
 
-The following diagrams illustrate how the modules interact:
-
-### System Architecture Flowchart
 ```mermaid
 flowchart TB
-    %% Styling
-    classDef main fill:#f5f7ff,stroke:#5c7cfa,stroke-width:2px,color:#333;
-    classDef stt fill:#eefaf0,stroke:#3b5bdb,stroke-width:1px,color:#333;
-    classDef llm fill:#f3f0ff,stroke:#845ef7,stroke-width:1px,color:#333;
-    classDef tts fill:#fff0f6,stroke:#e64980,stroke-width:1px,color:#333;
-    classDef client fill:#fff9db,stroke:#f59f00,stroke-width:2px,color:#333;
-    classDef external fill:#f8f9fa,stroke:#495057,stroke-width:1px,color:#333;
-    classDef config fill:#f1f3f5,stroke:#868e96,stroke-dasharray: 5 5,color:#495057;
+    classDef telephony fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef gateway fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef stt fill:#fff3e0,stroke:#e65100,stroke-width:1.5px,color:#bf360c
+    classDef llm fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1.5px,color:#4a148c
+    classDef storage fill:#f5f5f5,stroke:#616161,stroke-dasharray:5 5,color:#424242
+    classDef tts fill:#e0f7fa,stroke:#00695c,stroke-width:1.5px,color:#004d40
 
-    subgraph Client ["Client & Hardware Layer"]
-        User([User])
-        Mic[Microphone / Input Stream]
-        Speaker[Speaker / Output Stream]
+    subgraph Callers ["Parents & Students"]
+        Caller1([Hindi Speaking Parent])
+        Caller2([Gujarati Speaking Parent])
+        Caller3([English Speaking Student])
     end
-    class User,Mic,Speaker client;
+    class Caller1,Caller2,Caller3 telephony
 
-    subgraph Orchestrator ["Orchestrator (main.py)"]
-        Loop[Control Loop]
-        Buffer[Sentence Splitter Buffer]
+    subgraph Gateway ["Call Connection Layer"]
+        WSGateway["WebSocket Gateway\n(ws://0.0.0.0:8765)"]
     end
-    class Loop,Buffer main;
+    class WSGateway gateway
 
-    subgraph STT_Mod ["Speech-To-Text (stt/stt.py)"]
-        STT_Class[STT Class]
-        Whisper[faster-whisper Model]
+    subgraph Core ["Voice Agent Core"]
+        STT["STT Layer\n(sarvam)"]
+        LLM["LLM Engine & Tool Agent\n(qwen)"]
+        TTS["TTS Layer\n(sarvam)"]
     end
-    class STT_Class,Whisper stt;
+    class STT stt
+    class LLM llm
+    class TTS tts
 
-    subgraph LLM_Mod ["LLM Layer (llm/llm.py)"]
-        LLM_Class[LLM Class]
-        History[(Conversation History)]
-        SystemPrompt[System Persona Prompt]
+    subgraph Data ["Database Layer"]
+        Postgres[("PostgreSQL Database\n(Students, Marks, Attendance,\nPlacements, Admissions)")]
     end
-    class LLM_Class,History,SystemPrompt llm;
+    class Postgres storage
 
-    subgraph TTS_Mod ["Text-To-Speech (tts/tts.py)"]
-        TTS_Class[TTS Class]
-        Kokoro[Kokoro-82M Pipeline]
-    end
-    class TTS_Class,Kokoro tts;
-
-    subgraph Ext ["Local Services"]
-        Ollama[Ollama API Server]
-    end
-    class Ollama external;
-
-    subgraph Config_Mod ["Configuration (config/config.py)"]
-        ConfigSettings[STT, LLM, & TTS Knobs]
-    end
-    class ConfigSettings config;
-
-    %% Configuration Connections
-    ConfigSettings -.-> STT_Class
-    ConfigSettings -.-> LLM_Class
-    ConfigSettings -.-> TTS_Class
-
-    %% Interactive Loop Flows
-    User -- "1. Press Enter to speak" --> Loop
-    Loop -- "2. Record from mic" --> STT_Class
-    STT_Class -- "sounddevice InputStream" --> Mic
-    STT_Class -- "3. Transcribe audio" --> Whisper
-    Whisper -- "4. User Text" --> STT_Class
-    STT_Class -- "5. Return transcribed text" --> Loop
-    
-    Loop -- "6. Stream user text" --> LLM_Class
-    LLM_Class -- "Prune history" --> History
-    LLM_Class -- "Inject persona" --> SystemPrompt
-    LLM_Class -- "7. Chat stream request" --> Ollama
-    Ollama -- "8. Yield token chunks" --> LLM_Class
-    LLM_Class -- "9. Yield pieces" --> Loop
-    
-    Loop -- "Buffer pieces" --> Buffer
-    Buffer -- "10. Split complete sentences" --> Loop
-    
-    Loop -- "11. Speak sentence" --> TTS_Class
-    TTS_Class -- "12. Generate audio" --> Kokoro
-    TTS_Class -- "13. Play audio" --> Speaker
-```
-
-### Interaction Sequence Diagram
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Main as main.py (Orchestrator)
-    participant STT as stt/stt.py (faster-whisper)
-    participant LLM as llm/llm.py (Ollama Qwen/Llama)
-    participant TTS as tts/tts.py (Kokoro-82M)
-
-    rect rgb(240, 240, 255)
-        note over User, STT: Phase 1: Speech Input & Transcription
-        User->>Main: Press Enter to Start
-        Main->>STT: record()
-        Note over STT: sounddevice opens microphone input
-        User->>Main: Press Enter to Stop
-        STT-->>Main: Return Audio Array (numpy.ndarray)
-        Main->>STT: transcribe(audio)
-        STT->>STT: VAD filter + Whisper inference
-        STT-->>Main: Return Transcribed Text
-    end
-
-    rect rgb(240, 255, 240)
-        note over Main, LLM: Phase 2: LLM Streaming & TTS Synthesis Loop
-        Main->>LLM: reply_stream(user_text)
-        LLM->>LLM: Update conversation history
-        LLM->>LLM: Call Ollama API (POST /api/chat with stream=True)
-        
-        loop Stream response chunks
-            LLM-->>Main: Yield piece/token
-            Main->>Main: Append token to buffer
-            alt Sentence boundary matched (. ! ?)
-                Main->>Main: Extract sentence from buffer
-                Main->>TTS: speak(sentence)
-                TTS->>TTS: Kokoro pipeline synthesis
-                TTS->>User: Play audio (sounddevice blocks until done)
-            end
-        end
-        
-        alt Buffer has remaining text
-            Main->>TTS: speak(remaining_buffer)
-            TTS->>TTS: Kokoro pipeline synthesis
-            TTS->>User: Play audio
-        end
-        
-        LLM->>LLM: Save full response to history
-    end
+    Caller1 & Caller2 & Caller3 -- "WebSocket Connection" --> WSGateway
+    WSGateway -- "Audio Input Stream" --> STT
+    STT -- "Transcribed Text + Lang Tag" --> LLM
+    LLM -- "Tool Queries" --> Postgres
+    Postgres -- "Query Results" --> LLM
+    LLM -- "Response Text" --> TTS
+    TTS -- "Audio Output Stream" --> WSGateway
+    WSGateway -- "Audio Response" --> Caller1 & Caller2 & Caller3
 ```
 
 ---
 
-## 🛠️ Project Structure
+## 🛠️ Technology Stack
+
+| Layer | Provider / Tool | Description |
+|-------|----------------|-------------|
+| **Call Connection** | `websockets` | Real-time audio streaming connection gateway |
+| **STT (Speech-to-Text)** | `sarvam` | Multi-lingual speech recognition (EN, HI, GU) |
+| **LLM Engine** | `qwen` (via Ollama) | Local Qwen 2.5 LLM with tool-calling support |
+| **TTS (Text-to-Speech)** | `sarvam` | High quality multi-lingual voice synthesis |
+| **Database** | `postgresql` | Stores student marks, attendance, placements & admission details |
+
+---
+
+## 🔍 Detailed Component Breakdown
+
+### 1. Call Connectivity (`websockets`)
+- Real-time bi-directional audio connection over WebSockets.
+- Listens on `ws://0.0.0.0:8765`.
+- Accepts binary audio streams from calling clients and yields synthesized audio chunks back for instant playback.
+
+### 2. Speech-to-Text (`sarvam`)
+- Converts caller audio into transcribed text in real-time.
+- Automatically identifies spoken language (`hi-IN`, `gu-IN`, `en-IN`).
+- Code reference:
+```python
+from sarvamai import SarvamAI
+
+client = SarvamAI(api_subscription_key="YOUR_SARVAM_API_KEY")
+
+response = client.speech_to_text.transcribe(
+    file=open("audio.wav", "rb"),
+    mode="transcribe"
+)
+print(response)
+```
+
+### 3. LLM & Tool-Calling Agent (`qwen`)
+- Powered by Qwen 2.5 (3B) running locally via Ollama.
+- Personified as a university admission desk assistant.
+- Dynamically parses questions, executes database query tools, and synthesizes natural responses.
+
+#### 🧰 Available Agent Tools:
+1. **`lookup_student(identifier)`**: Finds a student's ID, department, and semester.
+2. **`get_student_marks(student_id)`**: Fetches subject-wise marks and grades.
+3. **`get_student_attendance(student_id)`**: Fetches attendance records and percentages.
+4. **`get_placement_stats(department)`**: Retrieves placement packages (LPA), placement rate %, and top recruiting companies.
+5. **`get_admission_info(program)`**: Fetches eligibility criteria, tuition fees, and application deadlines.
+
+### 4. Text-to-Speech (`sarvam`)
+- Synthesizes text responses into natural sounding audio in English, Hindi, or Gujarati.
+- Code reference:
+```python
+from sarvamai import SarvamAI
+
+client = SarvamAI(api_subscription_key="YOUR_SARVAM_API_KEY")
+
+response = client.text_to_speech.convert(
+    text="नमस्ते, आज मैं आपकी क्या मदद कर सकता हूँ?",
+    target_language_code="hi-IN",
+    speaker="shubh",
+)
+print(response)
+```
+
+### 5. PostgreSQL Database
+Stores structured university information. Schema includes:
+- **`students`**: `student_id`, `name`, `department_id`, `semester`, `parent_phone`
+- **`marks`**: `student_id`, `subject`, `marks_obtained`, `max_marks`, `grade`
+- **`attendance`**: `student_id`, `subject`, `total_classes`, `classes_attended`, `attendance_percentage`
+- **`placement_stats`**: `year`, `department_id`, `highest_package_lpa`, `average_package_lpa`, `top_recruiters`
+- **`admission_info`**: `program`, `eligibility`, `fee_per_year`, `last_date_to_apply`
+
+*(Note: Automatically falls back to local SQLite database if PostgreSQL is not active)*
+
+---
+
+## 📁 Project Structure
+
 ```text
-├── README.md               # Project documentation
-├── project.mermaid         # Standalone Mermaid source file
-├── main.py                 # Application orchestrator & control loop
+├── README.md               # Documentation
+├── pyproject.toml          # Project dependencies
+├── project.mermaid         # Architecture diagrams
+├── main.py                 # Application launcher (WebSocket Server & CLI Mode)
 ├── config/
-│   ├── __init__.py
-│   └── config.py          # Configuration parameters (models, devices, etc.)
+│   └── config.py           # Sarvam API keys, DB URL, model configs
 ├── stt/
-│   ├── __init__.py
-│   └── stt.py             # Push-to-talk recording + faster-whisper module
+│   └── stt.py              # STT integration (sarvam)
+├── tts/
+│   └── tts.py              # TTS integration (sarvam)
 ├── llm/
-│   ├── __init__.py
-│   └── llm.py             # Ollama chat integration & history buffer
-└── tts/
-    ├── __init__.py
-    └── tts.py             # Kokoro-82M pipeline & audio playback module
+│   └── llm.py              # Qwen LLM integration with DB Tool Calling
+├── db/
+│   ├── database.py         # PostgreSQL connection & query tool methods
+│   └── schema.sql          # DB schema definition & sample student seed data
+└── ws/
+    └── server.py           # WebSocket Media Gateway server
 ```
-
----
-
-## ⚙️ Configuration & Customization
-All runtime knobs are located in `config/config.py`. Here you can customize:
-* **STT**: Model size (`small.en`, `base.en`, etc.) and hardware device (`cpu` or `cuda`).
-* **LLM**: Model selection (`qwen2.5:3b`, `llama3.2:3b`), Ollama API endpoint, max token limits, and temperature.
-* **TTS**: Kokoro voice presets (`af_heart`, etc.) and playback speed.
-* **Conversation**: Size of the history context window (`MAX_HISTORY_TURNS`).
 
 ---
 
 ## 🚀 Setup & Execution
 
 ### 1. Requirements
-Ensure you have the following installed:
-* Python 3.10+
-* [Ollama](https://ollama.com/) running locally:
+- Python 3.10+
+- [Ollama](https://ollama.com/) running locally with Qwen:
   ```bash
   ollama pull qwen2.5:3b
   ```
-* System libraries for audio:
-  * On Linux/Debian: `sudo apt-get install portaudio19-dev libasound2-dev`
 
-### 2. Installation
-Install the Python package and its dependencies using `uv` (recommended) or `pip`:
+### 2. Environment Configuration
+Export your Sarvam API Key:
 ```bash
-uv pip install -e .
+export SARVAM_API_KEY="sk_xc0xbbkb_xTxOQkUEFOY8iwucsJOgPWIA"
 ```
-*(Dependencies include `sounddevice`, `numpy`, `faster-whisper`, `kokoro`, and `requests`)*
 
-### 3. Run the Agent
-Start the voice agent in your terminal:
+Optionally set custom PostgreSQL connection string:
 ```bash
-python main.py
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/university_agent"
 ```
-1. Press **Enter** to start recording your voice.
-2. Speak your message.
-3. Press **Enter** again to stop recording.
-4. The agent will transcribe your voice, retrieve responses in stream from your local LLM, and synthesize/play audio chunks sentence-by-sentence in real-time.
+
+### 3. Run the Voice Agent
+
+#### Mode A: WebSocket Media Server (Default)
+Starts WebSocket server for call connections on `ws://0.0.0.0:8765`:
+```bash
+.venv/bin/python main.py
+```
+
+#### Mode B: Terminal Interactive Mode (CLI)
+Test the agent using your microphone & speakers directly in terminal:
+```bash
+.venv/bin/python main.py --cli
+```
+
+---
+
+## 💬 Example Calls & Interactions
+
+- **Parent (Hindi):** *"मेरे बेटे आरव पटेल के मार्क्स क्या आए हैं?"*
+  - **Agent:** Executes `lookup_student("आरव पटेल")` -> `get_student_marks("STU101")`
+  - **Agent Response (Hindi spoken audio):** *"आरव पटेल को डेटा स्ट्रक्चर्स में 88 मार्क्स और डेटाबेस मैनेजमेंट में 92 मार्क्स मिले हैं।"*
+
+- **Parent (English):** *"What is the placement percentage for CSE department?"*
+  - **Agent:** Executes `get_placement_stats("CSE")`
+  - **Agent Response (English spoken audio):** *"The Computer Science department achieved a 96.5% placement rate with an average package of 12.5 LPA. Top recruiters include Google, Microsoft, and Amazon."*
