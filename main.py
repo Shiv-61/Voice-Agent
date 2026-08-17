@@ -1,25 +1,26 @@
 """
-University Admission & Student Info Voice Call Agent.
+University Admission & Student Info Voice Call Agent & RAG Portal.
 
 Pipeline:
   1. STT (Sarvam) -> Multi-lingual Speech-to-Text (English, Hindi, Gujarati)
-  2. LLM (Qwen 2.5 via Ollama) -> Context-aware, tri-lingual agent with PostgreSQL/SQLite DB tool calls
+  2. LLM (Qwen 2.5 via Ollama) -> Context-aware, tri-lingual agent with PostgreSQL/SQLite DB & RAG Vector Tool Calls
   3. TTS (Sarvam) -> Natural multi-lingual Speech Synthesis
+  4. RAG (ChromaDB + PyPDF) -> Dynamic PDF Knowledge Base ingestion & retrieval
 
 Modes:
-  - WebSocket Server (default): `python main.py` -> Runs WebSocket Media Server on ws://0.0.0.0:8765
+  - Unified Web & Voice Gateway (default): `python main.py` -> Runs Web UI & WebSocket Server on http://0.0.0.0:8765
   - Interactive CLI Mode: `python main.py --cli` -> Push-to-talk mic & speaker test in terminal
 """
 
 import argparse
-import asyncio
 import re
 import sys
+import uvicorn
 
+import config
 from stt import STT
 from llm import LLM
 from tts import TTS
-from ws.server import start_websocket_server
 
 SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
 
@@ -35,6 +36,7 @@ def split_ready_sentences(buffer: str):
 def run_cli_mode():
     """Interactive local Push-to-talk CLI mode."""
     import sounddevice as sd
+    import numpy as np
 
     stt = STT()
     llm = LLM()
@@ -44,7 +46,7 @@ def run_cli_mode():
     print("Supports queries in English, Hindi, and Gujarati.")
     print("Press Ctrl+C to exit.\n")
 
-    current_language = "en-IN"
+    current_language = config.DEFAULT_LANGUAGE
 
     try:
         while True:
@@ -62,7 +64,6 @@ def run_cli_mode():
             with stream:
                 input()
 
-            import numpy as np
             if not frames:
                 print("(didn't catch anything, try again)")
                 continue
@@ -110,12 +111,25 @@ def main():
         action="store_true",
         help="Run in local interactive push-to-talk terminal mode",
     )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=config.WS_HOST,
+        help="Host address to bind (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=config.WS_PORT,
+        help="Port number to bind (default: 8765)",
+    )
     args = parser.parse_args()
 
     if args.cli:
         run_cli_mode()
     else:
-        asyncio.run(start_websocket_server())
+        print(f"\n🚀 Starting Unified Voice Agent & Knowledge Portal on http://{args.host}:{args.port}")
+        uvicorn.run("web.server:app", host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":

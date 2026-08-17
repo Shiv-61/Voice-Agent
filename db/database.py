@@ -45,7 +45,8 @@ class Database:
                 sql_script = f.read()
             # Clean up Postgres specific syntax for SQLite compatibility
             sql_script = sql_script.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
-            sql_script = sql_script.replace("ON CONFLICT DO NOTHING", "-- ON CONFLICT IGNORED")
+            sql_script = sql_script.replace("ON CONFLICT DO NOTHING", "")
+            sql_script = sql_script.replace("INSERT INTO", "INSERT OR IGNORE INTO")
             cursor = self.conn.cursor()
             cursor.executescript(sql_script)
             self.conn.commit()
