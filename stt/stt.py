@@ -28,6 +28,19 @@ class STT:
     # Public API
     # ------------------------------------------------------------------
 
+    def _normalize_lang(self, lang: str | None) -> str:
+        if not lang or lang == "unknown":
+            return "unknown"
+        if lang in ("en", "en-IN"):
+            return "en-IN"
+        if lang in ("hi", "hi-IN"):
+            return "hi-IN"
+        if lang in ("gu", "gu-IN"):
+            return "gu-IN"
+        if len(lang) == 2:
+            return f"{lang}-IN"
+        return lang
+
     def transcribe(
         self,
         audio_bytes: bytes,
@@ -50,7 +63,7 @@ class STT:
             ``(transcript, detected_language_code)``
             e.g. ``("What are the placements like?", "en-IN")``
         """
-        lang = language_code or "unknown"
+        lang = self._normalize_lang(language_code)
 
         response = self.client.speech_to_text.transcribe(
             file=audio_bytes,

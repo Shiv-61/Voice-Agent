@@ -23,7 +23,7 @@ STT_MODE = "transcribe"              # transcribe | translate | verbatim
 
 # TTS
 TTS_MODEL = "bulbul:v3"
-TTS_SPEAKER = "anushka"              # see Sarvam docs for available speakers
+TTS_SPEAKER = "priya"                # valid speakers: priya, shreya, neha, rohan, aditya
 TTS_SPEED = 1.0
 
 # ---- Language ----

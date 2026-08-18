@@ -676,6 +676,9 @@ class VoiceAgentApp {
       if (!this.audioContext) {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
       }
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
       const audioBuffer = await this.audioContext.decodeAudioData(chunk.slice(0));
       this.currentAudioSource = this.audioContext.createBufferSource();
       this.currentAudioSource.buffer = audioBuffer;
