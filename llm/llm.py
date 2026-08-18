@@ -132,7 +132,7 @@ class LLM:
         try:
             while current_iteration < max_tool_iterations:
                 current_iteration += 1
-                resp = requests.post(config.OLLAMA_URL, json=payload, timeout=12)
+                resp = requests.post(config.OLLAMA_URL, json=payload, timeout=35)
                 resp.raise_for_status()
                 data = resp.json()
                 reply_content = data.get("message", {}).get("content", "")
