@@ -218,7 +218,7 @@ body {
 .header-controls {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
 .language-picker {
@@ -304,7 +304,7 @@ body {
   display: grid;
   grid-template-columns: 1.15fr 0.85fr;
   gap: 24px;
-  min-height: 560px;
+  min-height: 600px;
 }
 
 @media (max-width: 1024px) {
@@ -318,7 +318,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: space-between;
-  padding: 32px;
+  padding: 28px;
   position: relative;
   overflow: hidden;
 }
@@ -328,6 +328,49 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.stage-header-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.vad-toggle-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 3px 6px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+}
+
+.vad-label {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-weight: 700;
+  padding-left: 4px;
+}
+
+.mode-pill {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-pill.active {
+  background: rgba(99, 102, 241, 0.3);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.4);
 }
 
 .badge {
@@ -356,7 +399,7 @@ body {
 .visualizer-container {
   position: relative;
   width: 100%;
-  height: 220px;
+  height: 200px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -444,20 +487,20 @@ body {
 /* State & Controls */
 .stage-state {
   text-align: center;
-  margin: 8px 0 16px;
-  min-height: 28px;
+  margin: 6px 0 14px;
+  min-height: 26px;
 }
 
 .state-text {
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   color: var(--text-muted);
   font-weight: 500;
 }
 
 .stage-controls {
   display: flex;
-  gap: 14px;
-  margin-bottom: 20px;
+  gap: 12px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -466,15 +509,20 @@ body {
 .btn {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   font-family: var(--font-body);
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  padding: 12px 24px;
+  padding: 10px 22px;
   border-radius: var(--radius-full);
   border: none;
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.btn-sm {
+  padding: 6px 14px;
+  font-size: 0.82rem;
 }
 
 .btn-primary {
@@ -518,18 +566,18 @@ body {
 .suggested-queries {
   width: 100%;
   background: rgba(0, 0, 0, 0.2);
-  padding: 14px 18px;
+  padding: 12px 16px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
 }
 
 .chips-label {
   display: block;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .chips-wrapper {
@@ -542,8 +590,8 @@ body {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border-subtle);
   color: var(--text-muted);
-  font-size: 0.8rem;
-  padding: 5px 12px;
+  font-size: 0.78rem;
+  padding: 4px 10px;
   border-radius: var(--radius-full);
   cursor: pointer;
   transition: all 0.2s ease;
@@ -560,16 +608,16 @@ body {
   display: flex;
   flex-direction: column;
   padding: 24px;
-  height: 560px;
+  height: 600px;
 }
 
 .panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 16px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .panel-title-wrap {
@@ -604,8 +652,9 @@ body {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   padding-right: 6px;
+  margin-bottom: 12px;
 }
 
 .messages-container::-webkit-scrollbar {
@@ -617,11 +666,12 @@ body {
 }
 
 .message-bubble {
-  padding: 14px 18px;
+  padding: 12px 16px;
   border-radius: var(--radius-md);
   max-width: 90%;
   animation: bubblePop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   line-height: 1.5;
+  font-size: 0.88rem;
 }
 
 @keyframes bubblePop {
@@ -663,18 +713,61 @@ body {
   border-color: rgba(6, 182, 212, 0.3);
 }
 
-.tool-tag {
+/* Tool execution pill */
+.tool-pill {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: var(--radius-full);
-  margin-top: 6px;
+  gap: 6px;
   background: rgba(168, 85, 247, 0.15);
   color: #c084fc;
-  border: 1px solid rgba(168, 85, 247, 0.3);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  font-size: 0.74rem;
+  font-weight: 600;
+  align-self: flex-start;
+  margin: 2px 0;
+  animation: fadeIn 0.3s ease;
+}
+
+/* Dual Chat Input Bar */
+.chat-input-wrapper {
+  display: flex;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 6px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.chat-input-box {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  padding: 8px 12px;
+  outline: none;
+}
+
+.chat-send-btn {
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  border: none;
+  color: #fff;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.chat-send-btn:hover {
+  background: #4f46e5;
+  transform: scale(1.05);
 }
 
 /* ==========================================================================
@@ -934,6 +1027,23 @@ body {
   color: #ffffff;
 }
 
+.btn-inspect {
+  background: rgba(99, 102, 241, 0.1);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  margin-right: 6px;
+  transition: all 0.2s ease;
+}
+
+.btn-inspect:hover {
+  background: #6366f1;
+  color: #ffffff;
+}
+
 /* ==========================================================================
    TAB 3: University Database Explorer
    ========================================================================== */
@@ -1093,4 +1203,213 @@ body {
 .diag-row strong {
   color: var(--text-main);
   font-weight: 600;
+}
+
+/* ==========================================================================
+   Modals & Overlays
+   ========================================================================== */
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.2s ease;
+}
+
+.modal-card {
+  width: 90%;
+  max-width: 580px;
+  padding: 28px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.modal-title {
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.modal-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Phone Simulator Card */
+.phone-sim-card {
+  max-width: 420px;
+  text-align: center;
+}
+
+.phone-sim-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.pulse-ring-sm {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-rose);
+  box-shadow: 0 0 12px var(--accent-rose);
+  animation: pulseDot 1.2s infinite;
+}
+
+.call-badge {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent-rose);
+}
+
+.caller-avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 14px;
+  box-shadow: 0 0 25px rgba(99, 102, 241, 0.5);
+  animation: phoneRinging 1.5s infinite ease-in-out;
+}
+
+@keyframes phoneRinging {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  10%, 30% { transform: scale(1.06) rotate(-6deg); }
+  20%, 40% { transform: scale(1.06) rotate(6deg); }
+}
+
+.caller-title {
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.caller-phone {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.caller-inquiry {
+  display: inline-block;
+  font-size: 0.8rem;
+  color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.1);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  margin-bottom: 24px;
+}
+
+.phone-actions {
+  display: flex;
+  justify-content: center;
+  gap: 32px;
+}
+
+.btn-phone {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: none;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-phone-accept {
+  background: linear-gradient(135deg, #10b981, #059669);
+  box-shadow: 0 0 25px rgba(16, 185, 129, 0.6);
+}
+
+.btn-phone-accept:hover {
+  transform: scale(1.1);
+}
+
+.btn-phone-decline {
+  background: linear-gradient(135deg, #f43f5e, #e11d48);
+  box-shadow: 0 0 25px rgba(244, 63, 94, 0.6);
+}
+
+.btn-phone-decline:hover {
+  transform: scale(1.1);
+}
+
+/* Chunk Inspector Drawer */
+.chunk-inspector-card {
+  max-width: 720px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.chunks-inspector-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 6px;
+}
+
+/* Form in Add Student */
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.form-group.full-width {
+  grid-column: span 2;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 10px;
 }

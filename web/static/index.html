@@ -72,8 +72,14 @@
         </button>
       </nav>
 
-      <!-- Language & Connection Status -->
+      <!-- Header Controls -->
       <div class="header-controls">
+        <button id="openPhoneSimBtn" class="btn btn-sm btn-secondary" title="Simulate Inbound Telephony Call">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+          </svg>
+          <span>Phone Desk Sim</span>
+        </button>
         <div class="language-picker">
           <span class="lang-label">Lang:</span>
           <select id="languageSelect" class="lang-select">
@@ -100,7 +106,14 @@
           <!-- Voice Interaction Stage -->
           <div class="voice-stage glass-panel">
             <div class="stage-header">
-              <span class="badge badge-accent">Live Voice Call Session</span>
+              <div class="stage-header-left">
+                <span class="badge badge-accent">Live Voice Call Session</span>
+                <div class="vad-toggle-group">
+                  <span class="vad-label">Mode:</span>
+                  <button id="modeAutoVadBtn" class="mode-pill active" title="Automatically detects speech start and silence">🎙️ Hands-Free (Auto-VAD)</button>
+                  <button id="modePttBtn" class="mode-pill" title="Hold button to speak">🔘 Push-to-Talk</button>
+                </div>
+              </div>
               <span id="callDuration" class="call-timer">00:00</span>
             </div>
 
@@ -124,7 +137,7 @@
 
             <!-- Real-time Agent State Text -->
             <div class="stage-state">
-              <p id="agentStateText" class="state-text">Ready. Press Start Call or hold the button to speak.</p>
+              <p id="agentStateText" class="state-text">Ready. Press Start Call or speak into the microphone.</p>
             </div>
 
             <!-- Call Controls -->
@@ -136,12 +149,20 @@
                 <span>Start Voice Call</span>
               </button>
 
-              <button id="pushToTalkBtn" class="btn btn-secondary" disabled>
+              <button id="pushToTalkBtn" class="btn btn-secondary" style="display: none;" disabled>
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
                   <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
                 </svg>
-                <span>Push to Talk (Hold)</span>
+                <span>Hold to Speak</span>
+              </button>
+
+              <button id="interruptBtn" class="btn btn-secondary" style="display: none;" title="Interrupt Agent Speech">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="6" y="4" width="4" height="16"></rect>
+                  <rect x="14" y="4" width="4" height="16"></rect>
+                </svg>
+                <span>Interrupt</span>
               </button>
             </div>
 
@@ -174,6 +195,7 @@
               </button>
             </div>
 
+            <!-- Messages Stream Area -->
             <div class="messages-container" id="messagesContainer">
               <div class="message-bubble agent-bubble greeting">
                 <div class="bubble-header">
@@ -181,10 +203,21 @@
                   <span class="speaker-time">Just now</span>
                 </div>
                 <div class="bubble-content">
-                  Hello! I am your University Voice Assistant. You can ask me about admissions, fees, placements, student marks/attendance, or uploaded campus policy documents in English, Hindi, or Gujarati.
+                  Hello! I am your University Voice Assistant. You can speak into your microphone or type below to ask about admissions, fees, placements, student marks/attendance, or uploaded campus policy documents.
                 </div>
               </div>
             </div>
+
+            <!-- Dual Text Input Bar -->
+            <form id="chatInputForm" class="chat-input-wrapper">
+              <input type="text" id="chatTextInput" placeholder="Type your query or speak into microphone..." class="chat-input-box" />
+              <button type="submit" class="chat-send-btn" title="Send Message">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+              </button>
+            </form>
           </div>
         </div>
       </section>
@@ -368,6 +401,13 @@
                 </svg>
                 <h2>Student Directory & Academic Records</h2>
               </div>
+              <button id="openAddStudentModalBtn" class="btn btn-sm btn-primary">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                <span>Add Student Record</span>
+              </button>
             </div>
             <div class="data-table-wrapper">
               <table class="data-table" id="studentsTable">
@@ -525,6 +565,122 @@
       </section>
 
     </main>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- MODAL 1: Telephony Desk Simulator -->
+  <!-- ================================================================== -->
+  <div id="phoneSimModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card glass-panel phone-sim-card">
+      <div class="phone-sim-header">
+        <span class="pulse-ring-sm"></span>
+        <span class="call-badge">Incoming Voice Call</span>
+      </div>
+      <div class="caller-profile">
+        <div class="caller-avatar">
+          <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+        </div>
+        <h3 class="caller-title" id="simCallerName">Mr. Ramesh Patel (Parent)</h3>
+        <p class="caller-phone">+91 98765 43210 &bull; Ahmedabad, Gujarat</p>
+        <span class="caller-inquiry">Inquiring about: CSE Admission Fees & Aarav's Marks</span>
+      </div>
+      <div class="phone-actions">
+        <button id="declineCallBtn" class="btn-phone btn-phone-decline" title="Decline">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+        <button id="acceptCallBtn" class="btn-phone btn-phone-accept" title="Accept Call">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- MODAL 2: PDF Chunk Inspector Drawer -->
+  <!-- ================================================================== -->
+  <div id="chunkInspectorModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card glass-panel chunk-inspector-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="inspectorDocTitle" class="modal-title">📄 Document Chunks</h3>
+          <span id="inspectorDocSubtitle" class="modal-subtitle">ChromaDB Vector Embeddings</span>
+        </div>
+        <button id="closeInspectorBtn" class="btn-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="chunks-inspector-body" id="inspectorChunksList">
+        <div class="loading-cell">Loading chunk data...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- MODAL 3: Add Student Record -->
+  <!-- ================================================================== -->
+  <div id="addStudentModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card glass-panel add-student-card">
+      <div class="modal-header">
+        <h3 class="modal-title">➕ Add New Student Record</h3>
+        <button id="closeAddStudentBtn" class="btn-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <form id="addStudentForm" class="modal-form">
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Student ID</label>
+            <input type="text" id="newStuId" required placeholder="e.g. STU104" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Full Name</label>
+            <input type="text" id="newStuName" required placeholder="e.g. Priya Sharma" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Department</label>
+            <select id="newStuDept" class="form-input">
+              <option value="CSE">Computer Science (CSE)</option>
+              <option value="ECE">Electronics (ECE)</option>
+              <option value="MECH">Mechanical (MECH)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Semester</label>
+            <input type="number" id="newStuSem" min="1" max="8" value="4" class="form-input" />
+          </div>
+          <div class="form-group full-width">
+            <label>Parent Phone</label>
+            <input type="text" id="newStuPhone" placeholder="+919876543299" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Subject</label>
+            <input type="text" id="newStuSubject" value="Machine Learning" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Marks Obtained (/100)</label>
+            <input type="number" id="newStuMarks" min="0" max="100" value="94" class="form-input" />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="cancelAddStudentBtn" class="btn btn-secondary">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save to Database</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

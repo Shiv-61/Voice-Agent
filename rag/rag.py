@@ -185,6 +185,30 @@ class RAGStore:
 
         return list(docs_map.values())
 
+    def get_document_chunks(self, doc_id: str) -> list[dict[str, Any]]:
+        """Retrieves all indexed chunks, pages, and metadata for a specific document."""
+        try:
+            data = self.collection.get(where={"doc_id": doc_id}, include=["documents", "metadatas"])
+            docs = data.get("documents", [])
+            metas = data.get("metadatas", [])
+            ids = data.get("ids", [])
+
+            chunks = []
+            for chunk_id, doc, meta in zip(ids, docs, metas):
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "text": doc,
+                    "page": meta.get("page", 1),
+                    "chunk_index": meta.get("chunk_index", 1),
+                    "filename": meta.get("filename", "Unknown Document"),
+                })
+            # Sort chunks by page and index
+            chunks.sort(key=lambda c: (c["page"], c["chunk_index"]))
+            return chunks
+        except Exception as e:
+            print(f"[rag] Failed to get chunks for '{doc_id}': {e}")
+            return []
+
     def delete_document(self, doc_id: str) -> bool:
         """Deletes all chunks associated with a specific document ID."""
         try:

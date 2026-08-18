@@ -38,8 +38,8 @@ def split_ready_sentences(buffer: str):
 # Initialize application
 app = FastAPI(
     title="University Voice Agent Gateway",
-    description="Multilingual Voice Agent & Document Knowledge Base Portal",
-    version="1.0.0",
+    description="Multilingual Voice Agent & Document Intelligence Portal",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -154,6 +154,13 @@ async def list_documents():
     return {"documents": docs, "total": len(docs), "total_chunks": rag.collection.count()}
 
 
+@app.get("/api/documents/{doc_id}/chunks")
+async def get_document_chunks_endpoint(doc_id: str):
+    """Returns all indexed chunks for a specific document."""
+    chunks = rag.get_document_chunks(doc_id)
+    return {"doc_id": doc_id, "chunks": chunks, "total": len(chunks)}
+
+
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str):
     """Deletes a document and its embeddings from the vector store."""
@@ -176,7 +183,7 @@ async def search_documents(req: SearchRequest):
 
 
 # -----------------------------------------------------------------------------
-# REST API: Database Explorer
+# REST API: Database Explorer & CRUD
 # -----------------------------------------------------------------------------
 
 @app.get("/api/data/dashboard")
@@ -185,7 +192,7 @@ async def get_dashboard_summary():
     students = db._execute_query("SELECT COUNT(*) as count FROM students")
     admissions = db._execute_query("SELECT COUNT(*) as count FROM admission_info")
     placements = db._execute_query("SELECT COUNT(*) as count FROM placement_stats")
-    
+
     student_count = students[0]["count"] if students else 0
     admission_count = admissions[0]["count"] if admissions else 0
     placement_count = placements[0]["count"] if placements else 0
@@ -209,13 +216,45 @@ async def get_all_students():
         ORDER BY s.student_id
     """
     students = db._execute_query(query)
-    # Populate marks and attendance for each student
     for s in students:
         s_id = s["student_id"]
         s["marks"] = db.get_student_marks(s_id)
         s["attendance"] = db.get_student_attendance(s_id)
 
     return {"students": students}
+
+
+class StudentCreateRequest(BaseModel):
+    student_id: str
+    name: str
+    department_id: str
+    semester: int
+    parent_phone: str = ""
+    marks: list[dict] = []
+    attendance: list[dict] = []
+
+
+@app.post("/api/data/students")
+async def create_student(req: StudentCreateRequest):
+    """Inserts a new student into the active database."""
+    success = db.add_student(
+        student_id=req.student_id.strip().upper(),
+        name=req.name.strip(),
+        department_id=req.department_id.strip().upper(),
+        semester=req.semester,
+        parent_phone=req.parent_phone.strip(),
+        marks_list=req.marks,
+        attendance_list=req.attendance,
+    )
+    if success:
+        return {"success": True, "message": f"Student {req.name} ({req.student_id}) added successfully."}
+    raise HTTPException(status_code=500, detail="Failed to add student to database.")
+
+
+@app.get("/api/data/departments")
+async def get_departments_list():
+    """Lists departments."""
+    return {"departments": db.get_departments()}
 
 
 @app.get("/api/data/placements")
@@ -231,7 +270,7 @@ async def get_admissions():
 
 
 # -----------------------------------------------------------------------------
-# WebSocket: Real-time Voice Call Gateway
+# WebSocket: Real-time Voice & Text Call Gateway
 # -----------------------------------------------------------------------------
 
 class WebVoiceSession:
@@ -241,13 +280,90 @@ class WebVoiceSession:
         self.llm = LLM()
         self.tts = TTS()
         self.language_code = config.DEFAULT_LANGUAGE
+        self._hook_llm_tools()
+
+    def _hook_llm_tools(self):
+        """Wraps LLM tool execution to broadcast live tool events to the frontend."""
+        original_execute = self.llm._execute_tool
+
+        def wrapped_execute(tool_name: str, kwargs: dict) -> str:
+            # Broadcast tool execution event to client
+            import asyncio
+            try:
+                preview = f"{tool_name}({', '.join(f'{k}={v}' for k, v in kwargs.items())})"
+                asyncio.create_task(self.ws.send_json({
+                    "event": "tool_executed",
+                    "tool": tool_name,
+                    "args": kwargs,
+                    "preview": preview,
+                }))
+            except Exception as err:
+                print(f"[web-ws] Error sending tool event: {err}")
+            return original_execute(tool_name, kwargs)
+
+        self.llm._execute_tool = wrapped_execute
+
+    async def process_user_query(self, user_text: str, detected_lang: str):
+        """Processes a transcribed or typed query through LLM, tools, and TTS streaming."""
+        if not user_text.strip():
+            return
+
+        self.language_code = detected_lang
+
+        # 1. Send Thinking Event
+        await self.ws.send_json({"event": "agent_thinking"})
+
+        # 2. Query LLM & Stream TTS Chunks
+        buffer = ""
+        full_agent_reply = ""
+
+        for piece in self.llm.reply_stream(user_text):
+            buffer += piece
+            full_agent_reply += piece
+            ready_sentences, buffer = split_ready_sentences(buffer)
+
+            for sentence in ready_sentences:
+                if sentence.strip():
+                    await self.ws.send_json({
+                        "event": "agent_partial_text",
+                        "text": sentence.strip(),
+                    })
+                    try:
+                        audio_chunk = self.tts.synthesize(
+                            sentence.strip(), language_code=detected_lang
+                        )
+                        if audio_chunk:
+                            await self.ws.send_bytes(audio_chunk)
+                    except Exception as err:
+                        print(f"[web-ws] TTS chunk error: {err}")
+
+        # Process buffer remainder
+        if buffer.strip():
+            await self.ws.send_json({
+                "event": "agent_partial_text",
+                "text": buffer.strip(),
+            })
+            try:
+                audio_chunk = self.tts.synthesize(
+                    buffer.strip(), language_code=detected_lang
+                )
+                if audio_chunk:
+                    await self.ws.send_bytes(audio_chunk)
+            except Exception as err:
+                print(f"[web-ws] TTS buffer error: {err}")
+
+        # Signal completion
+        await self.ws.send_json({
+            "event": "agent_done",
+            "full_text": full_agent_reply.strip(),
+            "language": detected_lang,
+        })
 
     async def process_audio_payload(self, audio_bytes: bytes):
-        """Transcribes input audio, queries LLM + DB/RAG tools, and streams back synthesized audio."""
+        """Transcribes input audio bytes and runs pipeline."""
         if len(audio_bytes) < 200:
             return
 
-        # 1. Transcribe audio
         try:
             transcript, detected_lang = self.stt.transcribe(
                 audio_bytes, language_code=self.language_code
@@ -261,66 +377,15 @@ class WebVoiceSession:
             await self.ws.send_json({"event": "empty_transcript"})
             return
 
-        self.language_code = detected_lang
         print(f"🎙️ [web-ws] User [{detected_lang}]: {transcript}")
 
-        # Send transcript event to browser UI
         await self.ws.send_json({
             "event": "user_transcript",
             "text": transcript,
             "language": detected_lang,
         })
 
-        # 2. Query LLM & Stream TTS Chunks
-        buffer = ""
-        full_agent_reply = ""
-
-        await self.ws.send_json({"event": "agent_thinking"})
-
-        for piece in self.llm.reply_stream(transcript):
-            buffer += piece
-            full_agent_reply += piece
-            ready_sentences, buffer = split_ready_sentences(buffer)
-
-            for sentence in ready_sentences:
-                if sentence.strip():
-                    # Send partial text to UI
-                    await self.ws.send_json({
-                        "event": "agent_partial_text",
-                        "text": sentence.strip(),
-                    })
-                    # Synthesize audio chunk
-                    try:
-                        audio_chunk = self.tts.synthesize(
-                            sentence.strip(), language_code=detected_lang
-                        )
-                        if audio_chunk:
-                            # Send binary WAV chunk
-                            await self.ws.send_bytes(audio_chunk)
-                    except Exception as err:
-                        print(f"[web-ws] TTS synthesis chunk error: {err}")
-
-        # Process any remaining text in buffer
-        if buffer.strip():
-            await self.ws.send_json({
-                "event": "agent_partial_text",
-                "text": buffer.strip(),
-            })
-            try:
-                audio_chunk = self.tts.synthesize(
-                    buffer.strip(), language_code=detected_lang
-                )
-                if audio_chunk:
-                    await self.ws.send_bytes(audio_chunk)
-            except Exception as err:
-                print(f"[web-ws] TTS synthesis buffer error: {err}")
-
-        # Signal completion
-        await self.ws.send_json({
-            "event": "agent_done",
-            "full_text": full_agent_reply.strip(),
-            "language": detected_lang,
-        })
+        await self.process_user_query(transcript, detected_lang)
 
 
 @app.websocket("/ws/call")
@@ -334,7 +399,6 @@ async def websocket_call_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive()
             if "bytes" in message and message["bytes"]:
-                # Binary audio stream from client mic
                 audio_bytes = message["bytes"]
                 await session.process_audio_payload(audio_bytes)
 
@@ -348,6 +412,21 @@ async def websocket_call_endpoint(websocket: WebSocket):
                             "event": "session_started",
                             "language": session.language_code,
                         })
+                    elif event == "text_query":
+                        # Dual text chat input support
+                        text = payload.get("text", "")
+                        lang = payload.get("language_code", session.language_code)
+                        await websocket.send_json({
+                            "event": "user_transcript",
+                            "text": text,
+                            "language": lang,
+                        })
+                        await session.process_user_query(text, lang)
+
+                    elif event == "interrupt":
+                        # Client signal to interrupt playback
+                        print(f"🛑 [web-ws] Barge-in interruption from {client_host}")
+
                     elif event == "ping":
                         await websocket.send_json({"event": "pong"})
                 except Exception as e:
