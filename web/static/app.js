@@ -1,7 +1,7 @@
 /**
  * University Voice Agent & Document Intelligence Web Application
- * Handles WebAudio mic streaming, WebSocket communication, Canvas Waveform Visualizer,
- * PDF RAG uploads, and Database inspection.
+ * Complete Interactive Suite: Hands-Free Auto-VAD, Text/Voice Dual Input,
+ * Live Tool Visualizer, Telephony Simulator, PDF Chunk Inspector, and Student CRUD.
  */
 
 class VoiceAgentApp {
@@ -11,15 +11,25 @@ class VoiceAgentApp {
     this.mediaStream = null;
     this.audioInputNode = null;
     this.analyserNode = null;
+    this.processorNode = null;
+
     this.audioChunks = [];
     this.isRecording = false;
     this.isCallActive = false;
+    this.callMode = "auto_vad"; // 'auto_vad' | 'ptt'
     this.callStartTime = null;
     this.callTimerInterval = null;
+
+    // Auto-VAD threshold & timer state
+    this.vadThreshold = 0.015;
+    this.vadSilenceTimer = null;
+    this.vadSilenceDuration = 1200; // ms silence before commit
+    this.isSpeechDetected = false;
 
     // Audio Playback Queue
     this.playbackQueue = [];
     this.isPlayingAudio = false;
+    this.currentAudioSource = null;
 
     // Canvas animation
     this.canvas = document.getElementById("waveformCanvas");
@@ -33,21 +43,22 @@ class VoiceAgentApp {
     this.loadDatabaseData();
     this.checkSystemStatus();
 
-    // Start background canvas wave animation
     this.startCanvasAnimation();
-
-    // Periodic diagnostics check
     setInterval(() => this.checkSystemStatus(), 10000);
   }
 
   initElements() {
-    // Tabs
+    // Navigation
     this.tabButtons = document.querySelectorAll(".tab-btn");
     this.tabPanes = document.querySelectorAll(".tab-pane");
 
     // Controls
     this.startCallBtn = document.getElementById("startCallBtn");
     this.pushToTalkBtn = document.getElementById("pushToTalkBtn");
+    this.interruptBtn = document.getElementById("interruptBtn");
+    this.modeAutoVadBtn = document.getElementById("modeAutoVadBtn");
+    this.modePttBtn = document.getElementById("modePttBtn");
+
     this.micOrb = document.getElementById("micOrb");
     this.agentStateText = document.getElementById("agentStateText");
     this.messagesContainer = document.getElementById("messagesContainer");
@@ -55,6 +66,13 @@ class VoiceAgentApp {
     this.languageSelect = document.getElementById("languageSelect");
     this.wsStatusBadge = document.getElementById("wsStatusBadge");
     this.callDuration = document.getElementById("callDuration");
+
+    // Dual Chat Input
+    this.chatInputForm = document.getElementById("chatInputForm");
+    this.chatTextInput = document.getElementById("chatTextInput");
+
+    // Suggested Chips
+    this.chipButtons = document.querySelectorAll(".chip-btn");
 
     // RAG Elements
     this.pdfDropzone = document.getElementById("pdfDropzone");
@@ -69,16 +87,29 @@ class VoiceAgentApp {
     this.ragSearchBtn = document.getElementById("ragSearchBtn");
     this.ragSearchResults = document.getElementById("ragSearchResults");
 
-    // Suggested Chips
-    this.chipButtons = document.querySelectorAll(".chip-btn");
+    // Modals
+    this.phoneSimModal = document.getElementById("phoneSimModal");
+    this.openPhoneSimBtn = document.getElementById("openPhoneSimBtn");
+    this.acceptCallBtn = document.getElementById("acceptCallBtn");
+    this.declineCallBtn = document.getElementById("declineCallBtn");
+
+    this.chunkInspectorModal = document.getElementById("chunkInspectorModal");
+    this.closeInspectorBtn = document.getElementById("closeInspectorBtn");
+    this.inspectorDocTitle = document.getElementById("inspectorDocTitle");
+    this.inspectorChunksList = document.getElementById("inspectorChunksList");
+
+    this.addStudentModal = document.getElementById("addStudentModal");
+    this.openAddStudentModalBtn = document.getElementById("openAddStudentModalBtn");
+    this.closeAddStudentBtn = document.getElementById("closeAddStudentBtn");
+    this.cancelAddStudentBtn = document.getElementById("cancelAddStudentBtn");
+    this.addStudentForm = document.getElementById("addStudentForm");
   }
 
   initEventListeners() {
-    // Tab switching
+    // Tabs
     this.tabButtons.forEach((btn) => {
       btn.addEventListener("click", () => {
-        const targetTab = btn.getAttribute("data-tab");
-        this.switchTab(targetTab);
+        this.switchTab(btn.getAttribute("data-tab"));
       });
     });
 
@@ -89,10 +120,14 @@ class VoiceAgentApp {
       }
     });
 
-    // Start/End Voice Call Button
+    // Mode switch
+    this.modeAutoVadBtn.addEventListener("click", () => this.setCallMode("auto_vad"));
+    this.modePttBtn.addEventListener("click", () => this.setCallMode("ptt"));
+
+    // Call Toggle
     this.startCallBtn.addEventListener("click", () => this.toggleVoiceCall());
 
-    // Push to talk button
+    // Push to talk (PTT)
     this.pushToTalkBtn.addEventListener("mousedown", () => this.startPushToTalk());
     window.addEventListener("mouseup", () => this.stopPushToTalk());
     this.pushToTalkBtn.addEventListener("touchstart", (e) => {
@@ -101,16 +136,23 @@ class VoiceAgentApp {
     });
     window.addEventListener("touchend", () => this.stopPushToTalk());
 
+    // Interrupt Button
+    this.interruptBtn.addEventListener("click", () => this.interruptAgent());
+
+    // Dual Chat Text Input Form
+    this.chatInputForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = this.chatTextInput.value.trim();
+      if (!text) return;
+      this.chatTextInput.value = "";
+      this.sendTextMessage(text);
+    });
+
     // Suggested Chips click
     this.chipButtons.forEach((chip) => {
       chip.addEventListener("click", () => {
         const query = chip.getAttribute("data-query");
-        this.addMessageBubble("user", query);
-        this.updateStateText(`Processing query: "${query}"`);
-        // Synthesize direct query request if Ollama available
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.simulateTextInput(query);
-        }
+        this.sendTextMessage(query);
       });
     });
 
@@ -129,12 +171,10 @@ class VoiceAgentApp {
       `;
     });
 
-    // RAG Dropzone events
+    // RAG Dropzone
     this.pdfDropzone.addEventListener("click", () => this.pdfFileInput.click());
     this.pdfFileInput.addEventListener("change", (e) => {
-      if (e.target.files.length > 0) {
-        this.handleFileUpload(e.target.files[0]);
-      }
+      if (e.target.files.length > 0) this.handleFileUpload(e.target.files[0]);
     });
 
     ["dragenter", "dragover"].forEach((eventName) => {
@@ -152,9 +192,7 @@ class VoiceAgentApp {
     });
 
     this.pdfDropzone.addEventListener("drop", (e) => {
-      if (e.dataTransfer.files.length > 0) {
-        this.handleFileUpload(e.dataTransfer.files[0]);
-      }
+      if (e.dataTransfer.files.length > 0) this.handleFileUpload(e.dataTransfer.files[0]);
     });
 
     this.refreshDocsBtn.addEventListener("click", () => this.loadDocuments());
@@ -164,6 +202,54 @@ class VoiceAgentApp {
     this.ragSearchInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.executeRagSearch();
     });
+
+    // Telephony Simulator Modal
+    this.openPhoneSimBtn.addEventListener("click", () => {
+      this.phoneSimModal.style.display = "flex";
+    });
+    this.declineCallBtn.addEventListener("click", () => {
+      this.phoneSimModal.style.display = "none";
+    });
+    this.acceptCallBtn.addEventListener("click", () => {
+      this.phoneSimModal.style.display = "none";
+      this.switchTab("voice");
+      if (!this.isCallActive) this.toggleVoiceCall();
+    });
+
+    // Chunk Inspector Modal
+    this.closeInspectorBtn.addEventListener("click", () => {
+      this.chunkInspectorModal.style.display = "none";
+    });
+
+    // Add Student Modal
+    this.openAddStudentModalBtn.addEventListener("click", () => {
+      this.addStudentModal.style.display = "flex";
+    });
+    this.closeAddStudentBtn.addEventListener("click", () => {
+      this.addStudentModal.style.display = "none";
+    });
+    this.cancelAddStudentBtn.addEventListener("click", () => {
+      this.addStudentModal.style.display = "none";
+    });
+    this.addStudentForm.addEventListener("submit", (e) => this.handleAddStudentSubmit(e));
+  }
+
+  setCallMode(mode) {
+    this.callMode = mode;
+    if (mode === "auto_vad") {
+      this.modeAutoVadBtn.classList.add("active");
+      this.modePttBtn.classList.remove("active");
+      this.pushToTalkBtn.style.display = "none";
+      if (this.isCallActive) this.updateStateText("🎙️ Hands-Free Mode: Start speaking whenever ready.");
+    } else {
+      this.modeAutoVadBtn.classList.remove("active");
+      this.modePttBtn.classList.add("active");
+      if (this.isCallActive) {
+        this.pushToTalkBtn.style.display = "inline-flex";
+        this.pushToTalkBtn.disabled = false;
+        this.updateStateText("🔘 Push-to-Talk Mode: Hold the button to speak.");
+      }
+    }
   }
 
   switchTab(targetTab) {
@@ -213,10 +299,8 @@ class VoiceAgentApp {
 
     this.ws.onmessage = async (event) => {
       if (event.data instanceof ArrayBuffer) {
-        // Binary WAV audio chunk from Sarvam TTS
         this.enqueueAudioChunk(event.data);
       } else {
-        // JSON event
         try {
           const msg = JSON.parse(event.data);
           this.handleServerEvent(msg);
@@ -247,26 +331,51 @@ class VoiceAgentApp {
   handleServerEvent(msg) {
     if (msg.event === "user_transcript") {
       this.addMessageBubble("user", msg.text, msg.language);
-      this.updateStateText(`Transcribed: "${msg.text}"`);
+      this.updateStateText(`Processing: "${msg.text}"`);
     } else if (msg.event === "agent_thinking") {
       this.updateStateText("Reasoning with Qwen 2.5 + Querying Tools...");
+    } else if (msg.event === "tool_executed") {
+      // Render glowing tool execution pill in chat
+      this.addToolExecutionPill(msg.tool, msg.args, msg.preview);
     } else if (msg.event === "agent_partial_text") {
       this.updateStateText(`Agent speaking: "${msg.text}"`);
+      this.interruptBtn.style.display = "inline-flex";
     } else if (msg.event === "agent_done") {
       this.addMessageBubble("agent", msg.full_text, msg.language);
-      this.updateStateText("Ready. Listening for next query...");
+      this.updateStateText("Ready. Listening for next question...");
     } else if (msg.event === "empty_transcript") {
       this.updateStateText("Didn't catch that. Please speak again.");
     }
   }
 
+  sendTextMessage(text) {
+    if (!text.trim()) return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.interruptAgent(); // Stop any previous speech
+      this.ws.send(JSON.stringify({
+        event: "text_query",
+        text: text.trim(),
+        language_code: this.languageSelect.value,
+      }));
+    }
+  }
+
+  addToolExecutionPill(toolName, args, preview) {
+    if (!this.messagesContainer) return;
+    const pill = document.createElement("div");
+    pill.className = "tool-pill";
+    const icon = toolName === "search_university_docs" ? "📄 RAG Vector Query" : "⚡ SQL Tool";
+    pill.innerHTML = `<span>${icon}:</span> <code>${preview || toolName}</code>`;
+    this.messagesContainer.appendChild(pill);
+    this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+  }
+
   // =========================================================================
-  // Audio Recording & Streaming (WebAudio API)
+  // WebAudio Recording & Auto-VAD
   // =========================================================================
 
   async toggleVoiceCall() {
     if (!this.isCallActive) {
-      // Start call
       try {
         await this.initAudioContext();
         this.isCallActive = true;
@@ -278,10 +387,18 @@ class VoiceAgentApp {
           <span>End Voice Call</span>
         `;
         this.startCallBtn.classList.replace("btn-primary", "btn-danger");
-        this.pushToTalkBtn.disabled = false;
-        this.updateStateText("Call connected. Hold Push-to-Talk or speak into microphone.");
 
-        // Start call timer
+        if (this.callMode === "ptt") {
+          this.pushToTalkBtn.style.display = "inline-flex";
+          this.pushToTalkBtn.disabled = false;
+          this.updateStateText("🔘 Hold button to speak.");
+        } else {
+          this.pushToTalkBtn.style.display = "none";
+          this.startAutoVadListening();
+          this.updateStateText("🎙️ Hands-Free Connected. Speak into microphone anytime.");
+        }
+
+        // Start timer
         this.callStartTime = Date.now();
         this.callTimerInterval = setInterval(() => {
           const diff = Math.floor((Date.now() - this.callStartTime) / 1000);
@@ -292,11 +409,12 @@ class VoiceAgentApp {
 
       } catch (err) {
         console.error("Mic access denied:", err);
-        alert("Microphone permission is required for voice calling.");
+        alert("Microphone permission is required for live voice calls.");
       }
     } else {
       // End call
       this.isCallActive = false;
+      this.stopAutoVadListening();
       this.stopRecording();
       if (this.mediaStream) {
         this.mediaStream.getTracks().forEach((track) => track.stop());
@@ -308,7 +426,8 @@ class VoiceAgentApp {
         <span>Start Voice Call</span>
       `;
       this.startCallBtn.classList.replace("btn-danger", "btn-primary");
-      this.pushToTalkBtn.disabled = true;
+      this.pushToTalkBtn.style.display = "none";
+      this.interruptBtn.style.display = "none";
       this.updateStateText("Call ended.");
       clearInterval(this.callTimerInterval);
       if (this.callDuration) this.callDuration.innerText = "00:00";
@@ -329,14 +448,105 @@ class VoiceAgentApp {
     this.audioInputNode.connect(this.analyserNode);
   }
 
+  // --- Auto-VAD Listening ---
+  startAutoVadListening() {
+    if (!this.isCallActive || this.processorNode) return;
+
+    const bufferSize = 4096;
+    this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
+    this.audioChunks = [];
+    this.isSpeechDetected = false;
+
+    this.processorNode.onaudioprocess = (e) => {
+      if (!this.isCallActive || this.callMode !== "auto_vad" || this.isPlayingAudio) return;
+
+      const input = e.inputBuffer.getChannelData(0);
+      // Calculate RMS energy
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) {
+        sum += input[i] * input[i];
+      }
+      const rms = Math.sqrt(sum / input.length);
+
+      if (rms > this.vadThreshold) {
+        // Speech detected
+        if (!this.isSpeechDetected) {
+          this.isSpeechDetected = true;
+          this.micOrb.classList.add("active");
+          this.updateStateText("🎙️ Listening... Speaking detected.");
+        }
+        this.audioChunks.push(new Float32Array(input));
+
+        // Clear silence timeout
+        if (this.vadSilenceTimer) {
+          clearTimeout(this.vadSilenceTimer);
+          this.vadSilenceTimer = null;
+        }
+      } else if (this.isSpeechDetected) {
+        // Still buffer during small pauses
+        this.audioChunks.push(new Float32Array(input));
+
+        if (!this.vadSilenceTimer) {
+          this.vadSilenceTimer = setTimeout(() => {
+            this.commitAutoVadSpeech();
+          }, this.vadSilenceDuration);
+        }
+      }
+    };
+
+    this.audioInputNode.connect(this.processorNode);
+    this.processorNode.connect(this.audioContext.destination);
+  }
+
+  stopAutoVadListening() {
+    if (this.vadSilenceTimer) {
+      clearTimeout(this.vadSilenceTimer);
+      this.vadSilenceTimer = null;
+    }
+    if (this.processorNode) {
+      this.processorNode.disconnect();
+      this.audioInputNode.disconnect(this.processorNode);
+      this.processorNode = null;
+    }
+  }
+
+  commitAutoVadSpeech() {
+    this.isSpeechDetected = false;
+    this.micOrb.classList.remove("active");
+    this.updateStateText("Transcribing voice with Sarvam AI...");
+
+    const totalLength = this.audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    if (totalLength < 3000) {
+      this.audioChunks = [];
+      this.updateStateText("🎙️ Listening... Speak whenever ready.");
+      return;
+    }
+
+    const mergedBuffer = new Float32Array(totalLength);
+    let offset = 0;
+    for (const chunk of this.audioChunks) {
+      mergedBuffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+    this.audioChunks = [];
+
+    const wavBlob = this.encodeWAV(mergedBuffer, 16000);
+    wavBlob.arrayBuffer().then((arrayBuf) => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(arrayBuf);
+      }
+    });
+  }
+
+  // --- Push to talk ---
   startPushToTalk() {
     if (!this.isCallActive || this.isRecording) return;
+    this.interruptAgent();
     this.isRecording = true;
     this.audioChunks = [];
     this.micOrb.classList.add("active");
     this.updateStateText("🎙️ Listening... Speak now.");
 
-    // Create script processor to capture PCM samples
     const bufferSize = 4096;
     this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
     this.processorNode.onaudioprocess = (e) => {
@@ -358,9 +568,9 @@ class VoiceAgentApp {
     if (this.processorNode) {
       this.processorNode.disconnect();
       this.audioInputNode.disconnect(this.processorNode);
+      this.processorNode = null;
     }
 
-    // Merge Float32 chunks into single WAV file
     const totalLength = this.audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
     if (totalLength < 2000) {
       this.updateStateText("Too short. Please hold button and speak clearly.");
@@ -385,9 +595,23 @@ class VoiceAgentApp {
   stopRecording() {
     this.isRecording = false;
     this.micOrb.classList.remove("active");
-    if (this.processorNode) {
-      this.processorNode.disconnect();
+  }
+
+  interruptAgent() {
+    this.playbackQueue = [];
+    this.isPlayingAudio = false;
+    if (this.currentAudioSource) {
+      try {
+        this.currentAudioSource.stop();
+      } catch (e) {}
+      this.currentAudioSource = null;
     }
+    this.micOrb.classList.remove("agent-speaking");
+    this.interruptBtn.style.display = "none";
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ event: "interrupt" }));
+    }
+    this.updateStateText("Interrupted. Ready for next query.");
   }
 
   encodeWAV(samples, sampleRate) {
@@ -400,34 +624,20 @@ class VoiceAgentApp {
       }
     };
 
-    /* RIFF identifier */
     writeString(view, 0, "RIFF");
-    /* file length */
     view.setUint32(4, 36 + samples.length * 2, true);
-    /* RIFF type */
     writeString(view, 8, "WAVE");
-    /* format chunk identifier */
     writeString(view, 12, "fmt ");
-    /* format chunk length */
     view.setUint32(16, 16, true);
-    /* sample format (raw) */
     view.setUint16(20, 1, true);
-    /* channel count */
     view.setUint16(22, 1, true);
-    /* sample rate */
     view.setUint32(24, sampleRate, true);
-    /* byte rate (sample rate * block align) */
     view.setUint32(28, sampleRate * 2, true);
-    /* block align (channel count * bytes per sample) */
     view.setUint16(32, 2, true);
-    /* bits per sample */
     view.setUint16(34, 16, true);
-    /* data chunk identifier */
     writeString(view, 36, "data");
-    /* data chunk length */
     view.setUint32(40, samples.length * 2, true);
 
-    // Write PCM 16-bit
     let index = 44;
     for (let i = 0; i < samples.length; i++) {
       let s = Math.max(-1, Math.min(1, samples[i]));
@@ -453,26 +663,32 @@ class VoiceAgentApp {
     if (this.playbackQueue.length === 0) {
       this.isPlayingAudio = false;
       this.micOrb.classList.remove("agent-speaking");
+      this.interruptBtn.style.display = "none";
       return;
     }
 
     this.isPlayingAudio = true;
     this.micOrb.classList.add("agent-speaking");
+    this.interruptBtn.style.display = "inline-flex";
 
     const chunk = this.playbackQueue.shift();
     try {
       if (!this.audioContext) {
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
       }
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
       const audioBuffer = await this.audioContext.decodeAudioData(chunk.slice(0));
-      const source = this.audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this.audioContext.destination);
+      this.currentAudioSource = this.audioContext.createBufferSource();
+      this.currentAudioSource.buffer = audioBuffer;
+      this.currentAudioSource.connect(this.audioContext.destination);
 
-      source.onended = () => {
+      this.currentAudioSource.onended = () => {
+        this.currentAudioSource = null;
         this.playNextAudioChunk();
       };
-      source.start();
+      this.currentAudioSource.start();
     } catch (e) {
       console.error("Playback decode error:", e);
       this.playNextAudioChunk();
@@ -480,7 +696,7 @@ class VoiceAgentApp {
   }
 
   // =========================================================================
-  // Canvas Animated Waveform Visualizer
+  // Canvas Visualizer
   // =========================================================================
 
   startCanvasAnimation() {
@@ -493,10 +709,10 @@ class VoiceAgentApp {
       const height = this.canvas.height;
       this.canvasCtx.clearRect(0, 0, width, height);
 
-      let amplitude = 15;
+      let amplitude = 12;
       let frequency = 0.02;
 
-      if (this.isRecording) {
+      if (this.isSpeechDetected || this.isRecording) {
         amplitude = 45;
         frequency = 0.04;
       } else if (this.isPlayingAudio) {
@@ -504,7 +720,6 @@ class VoiceAgentApp {
         frequency = 0.035;
       }
 
-      // Draw glowing sine waves
       for (let i = 0; i < 3; i++) {
         this.canvasCtx.beginPath();
         this.canvasCtx.lineWidth = 2.5 - i * 0.5;
@@ -527,10 +742,6 @@ class VoiceAgentApp {
     draw();
   }
 
-  // =========================================================================
-  // UI Helpers & Messages
-  // =========================================================================
-
   updateStateText(text) {
     if (this.agentStateText) this.agentStateText.innerText = text;
   }
@@ -542,7 +753,7 @@ class VoiceAgentApp {
     bubble.className = `message-bubble ${role === "user" ? "user-bubble" : "agent-bubble"}`;
 
     const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const speaker = role === "user" ? `🧑 You (${lang || "Caller"})` : "🎓 UniVoice Agent";
+    const speaker = role === "user" ? `🧑 Caller (${lang || "User"})` : "🎓 UniVoice Agent";
 
     bubble.innerHTML = `
       <div class="bubble-header">
@@ -632,12 +843,43 @@ class VoiceAgentApp {
           <td>${d.max_page} pages</td>
           <td><span class="badge badge-accent">${d.total_chunks} chunks</span></td>
           <td>
+            <button class="btn-inspect" onclick="window.voiceApp.inspectChunks('${d.doc_id}', '${d.filename}')">Inspect</button>
             <button class="btn-delete" onclick="window.voiceApp.deleteDoc('${d.doc_id}')">Delete</button>
           </td>
         </tr>
       `).join("");
     } catch (e) {
       console.error("Error loading docs:", e);
+    }
+  }
+
+  async inspectChunks(docId, filename) {
+    this.inspectorDocTitle.innerText = `📄 ${filename}`;
+    this.inspectorChunksList.innerHTML = `<div class="loading-cell">Loading chunk vectors...</div>`;
+    this.chunkInspectorModal.style.display = "flex";
+
+    try {
+      const res = await fetch(`/api/documents/${docId}/chunks`);
+      const data = await res.json();
+      const chunks = data.chunks || [];
+
+      if (chunks.length === 0) {
+        this.inspectorChunksList.innerHTML = `<div class="empty-state-text">No chunks found for this document.</div>`;
+        return;
+      }
+
+      this.inspectorChunksList.innerHTML = chunks.map((c) => `
+        <div class="chunk-card">
+          <div class="chunk-header">
+            <span>Page ${c.page} &bull; Chunk #${c.chunk_index}</span>
+            <code style="font-size: 0.72rem; color: var(--text-dim);">${c.chunk_id}</code>
+          </div>
+          <p style="font-size: 0.85rem; line-height: 1.5; color: var(--text-main);">${c.text}</p>
+        </div>
+      `).join("");
+    } catch (e) {
+      console.error("Inspect chunks error:", e);
+      this.inspectorChunksList.innerHTML = `<div class="upload-feedback error">Failed to load chunks.</div>`;
     }
   }
 
@@ -689,12 +931,11 @@ class VoiceAgentApp {
   }
 
   // =========================================================================
-  // Database Explorer
+  // Database Explorer & CRUD
   // =========================================================================
 
   async loadDatabaseData() {
     try {
-      // Dashboard KPIs
       const dashRes = await fetch("/api/data/dashboard");
       const dashData = await dashRes.json();
       document.getElementById("metricStudents").innerText = dashData.total_students || 0;
@@ -715,7 +956,7 @@ class VoiceAgentApp {
               <td>${s.name}</td>
               <td>${s.department_name}</td>
               <td>Sem ${s.semester}</td>
-              <td><small>${marksStr || "No marks"}</small></td>
+              <td><small>${marksStr || "No marks recorded"}</small></td>
             </tr>
           `;
         }).join("");
@@ -754,8 +995,49 @@ class VoiceAgentApp {
     }
   }
 
+  async handleAddStudentSubmit(e) {
+    e.preventDefault();
+    const studentId = document.getElementById("newStuId").value.trim();
+    const name = document.getElementById("newStuName").value.trim();
+    const dept = document.getElementById("newStuDept").value;
+    const sem = parseInt(document.getElementById("newStuSem").value, 10);
+    const phone = document.getElementById("newStuPhone").value.trim();
+    const subject = document.getElementById("newStuSubject").value.trim() || "Advanced Computing";
+    const marks = parseInt(document.getElementById("newStuMarks").value, 10) || 90;
+
+    const payload = {
+      student_id: studentId,
+      name: name,
+      department_id: dept,
+      semester: sem,
+      parent_phone: phone,
+      marks: [{ subject: subject, marks_obtained: marks, max_marks: 100, grade: marks >= 90 ? "A+" : "A" }],
+      attendance: [{ subject: subject, total_classes: 40, classes_attended: 38 }],
+    };
+
+    try {
+      const res = await fetch("/api/data/students", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert(`✓ Added ${name} (${studentId})! You can now ask the voice agent about ${name}.`);
+        this.addStudentModal.style.display = "none";
+        this.addStudentForm.reset();
+        this.loadDatabaseData();
+      } else {
+        alert(data.detail || "Failed to add student.");
+      }
+    } catch (err) {
+      console.error("Add student error:", err);
+      alert("Network error.");
+    }
+  }
+
   // =========================================================================
-  // System Diagnostics Check
+  // System Diagnostics
   // =========================================================================
 
   async checkSystemStatus() {
@@ -793,7 +1075,6 @@ class VoiceAgentApp {
   }
 }
 
-// Global initialization
 window.addEventListener("DOMContentLoaded", () => {
   window.voiceApp = new VoiceAgentApp();
 });

@@ -100,15 +100,41 @@ def test_fastapi_endpoints():
     assert r.status_code == 200, f"Dashboard API failed: {r.text}"
     print(f"✓ GET /api/data/dashboard -> Students: {r.json()['total_students']}, Programs: {r.json()['total_programs']}.")
 
-    # Document List
+    # Document List & Chunks
     r = client.get("/api/documents")
     assert r.status_code == 200, f"Documents list API failed: {r.text}"
-    print(f"✓ GET /api/documents -> {len(r.json()['documents'])} documents found in collection.")
+    docs = r.json()["documents"]
+    print(f"✓ GET /api/documents -> {len(docs)} documents found in collection.")
+    if docs:
+        doc_id = docs[0]["doc_id"]
+        r_chunks = client.get(f"/api/documents/{doc_id}/chunks")
+        assert r_chunks.status_code == 200, f"Chunks API failed: {r_chunks.text}"
+        print(f"✓ GET /api/documents/{doc_id}/chunks -> {len(r_chunks.json()['chunks'])} chunks retrieved.")
 
     # Document Search
     r = client.post("/api/documents/search", json={"query": "attendance", "n_results": 2})
     assert r.status_code == 200, f"Search API failed: {r.text}"
     print(f"✓ POST /api/documents/search -> {len(r.json()['results'])} matching chunks returned.")
+
+    # Add Student Record CRUD
+    new_student = {
+        "student_id": "STU104",
+        "name": "Priya Sharma",
+        "department_id": "CSE",
+        "semester": 6,
+        "parent_phone": "+919876543299",
+        "marks": [{"subject": "Cloud Computing", "marks_obtained": 96, "max_marks": 100, "grade": "A+"}],
+        "attendance": [{"subject": "Cloud Computing", "total_classes": 40, "classes_attended": 39}],
+    }
+    r_add = client.post("/api/data/students", json=new_student)
+    assert r_add.status_code == 200, f"Add student API failed: {r_add.text}"
+    print(f"✓ POST /api/data/students -> Successfully added {new_student['name']} ({new_student['student_id']}).")
+
+    # Verify newly added student via DB lookup
+    db = Database()
+    s_verify = db.lookup_student("Priya Sharma")
+    assert s_verify is not None and s_verify["student_id"] == "STU104", "Failed to lookup newly created student"
+    print(f"✓ Verified New Student in DB: {s_verify['name']} (Sem {s_verify['semester']} {s_verify['department_name']})")
 
 
 if __name__ == "__main__":

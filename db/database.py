@@ -157,3 +157,75 @@ class Database:
         else:
             query = "SELECT program, eligibility, fee_per_year, last_date_to_apply FROM admission_info"
             return self._execute_query(query)
+
+    def get_departments(self) -> list[dict]:
+        """Get all department records."""
+        return self._execute_query("SELECT department_id, department_name FROM departments ORDER BY department_id")
+
+    def add_student(
+        self,
+        student_id: str,
+        name: str,
+        department_id: str,
+        semester: int,
+        parent_phone: str = "",
+        marks_list: list[dict] | None = None,
+        attendance_list: list[dict] | None = None,
+    ) -> bool:
+        """Inserts a new student and associated marks/attendance into the database."""
+        cursor = self.conn.cursor()
+        try:
+            # 1. Insert student
+            insert_student_sql = """
+                INSERT OR IGNORE INTO students (student_id, name, department_id, semester, parent_phone)
+                VALUES (?, ?, ?, ?, ?)
+            """ if self.use_sqlite else """
+                INSERT INTO students (student_id, name, department_id, semester, parent_phone)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (student_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    department_id = EXCLUDED.department_id,
+                    semester = EXCLUDED.semester,
+                    parent_phone = EXCLUDED.parent_phone
+            """
+            cursor.execute(insert_student_sql, (student_id, name, department_id, semester, parent_phone))
+
+            # 2. Insert marks
+            if marks_list:
+                for m in marks_list:
+                    subject = m.get("subject", "General Subject")
+                    obtained = int(m.get("marks_obtained", 85))
+                    max_m = int(m.get("max_marks", 100))
+                    grade = m.get("grade", "A")
+
+                    insert_marks_sql = """
+                        INSERT INTO marks (student_id, subject, marks_obtained, max_marks, grade)
+                        VALUES (?, ?, ?, ?, ?)
+                    """ if self.use_sqlite else """
+                        INSERT INTO marks (student_id, subject, marks_obtained, max_marks, grade)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(insert_marks_sql, (student_id, subject, obtained, max_m, grade))
+
+            # 3. Insert attendance
+            if attendance_list:
+                for a in attendance_list:
+                    subject = a.get("subject", "General Subject")
+                    total = int(a.get("total_classes", 40))
+                    attended = int(a.get("classes_attended", 36))
+                    pct = round((attended / total) * 100, 2) if total > 0 else 90.0
+
+                    insert_att_sql = """
+                        INSERT INTO attendance (student_id, subject, total_classes, classes_attended, attendance_percentage)
+                        VALUES (?, ?, ?, ?, ?)
+                    """ if self.use_sqlite else """
+                        INSERT INTO attendance (student_id, subject, total_classes, classes_attended, attendance_percentage)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(insert_att_sql, (student_id, subject, total, attended, pct))
+
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] Add student error: {e}")
+            return False

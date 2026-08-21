@@ -7,9 +7,15 @@ Environment variables:
 """
 
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from project root
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # ---- Sarvam AI (STT + TTS) ----
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_xc0xbbkb_xTxOQkUEFOY8iwucsJOgPWIA")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 
 # STT
 STT_MODEL = "saaras:v3"
@@ -17,7 +23,7 @@ STT_MODE = "transcribe"              # transcribe | translate | verbatim
 
 # TTS
 TTS_MODEL = "bulbul:v3"
-TTS_SPEAKER = "anushka"              # see Sarvam docs for available speakers
+TTS_SPEAKER = "priya"                # valid speakers: priya, shreya, neha, rohan, aditya
 TTS_SPEED = 1.0
 
 # ---- Language ----

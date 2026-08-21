@@ -22,6 +22,19 @@ class TTS:
         self.client = SarvamAI(api_subscription_key=config.SARVAM_API_KEY)
         print("[tts] Sarvam TTS client ready.")
 
+    def _normalize_lang(self, lang: str | None) -> str:
+        if not lang or lang == "unknown":
+            return "en-IN"
+        if lang in ("en", "en-IN"):
+            return "en-IN"
+        if lang in ("hi", "hi-IN"):
+            return "hi-IN"
+        if lang in ("gu", "gu-IN"):
+            return "gu-IN"
+        if len(lang) == 2:
+            return f"{lang}-IN"
+        return lang
+
     def synthesize(
         self,
         text: str,
@@ -45,16 +58,21 @@ class TTS:
         if not text.strip():
             return b""
 
-        response = self.client.text_to_speech.convert(
-            model=config.TTS_MODEL,
-            text=text,
-            target_language_code=language_code,
-            speaker=config.TTS_SPEAKER,
-        )
+        lang = self._normalize_lang(language_code)
 
-        # Sarvam returns a list of base64-encoded WAV strings
-        if response.audios:
-            return base64.b64decode(response.audios[0])
+        try:
+            response = self.client.text_to_speech.convert(
+                model=config.TTS_MODEL,
+                text=text.strip(),
+                language_code=lang,
+                speaker=config.TTS_SPEAKER,
+            )
+
+            # Sarvam returns a list of base64-encoded WAV strings
+            if response.audios and len(response.audios) > 0:
+                return base64.b64decode(response.audios[0])
+        except Exception as e:
+            print(f"[tts] Synthesis error for '{text[:40]}...': {e}")
         return b""
 
     def speak_local(self, text: str, language_code: str = "en-IN"):

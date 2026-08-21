@@ -128,7 +128,10 @@ def main():
     if args.cli:
         run_cli_mode()
     else:
-        print(f"\n🚀 Starting Unified Voice Agent & Knowledge Portal on http://{args.host}:{args.port}")
+        print("\n=======================================================")
+        print(f"🚀 UniVoice AI Portal & Voice Gateway is Active!")
+        print(f"👉 Open in your browser: http://localhost:{args.port} (or http://127.0.0.1:{args.port})")
+        print("=======================================================\n")
         uvicorn.run("web.server:app", host=args.host, port=args.port, reload=False)
 
 
