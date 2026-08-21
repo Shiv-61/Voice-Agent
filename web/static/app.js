@@ -315,14 +315,17 @@ class VoiceAgentApp {
     if (!this.wsStatusBadge) return;
     this.wsStatusBadge.className = "status-indicator";
     if (status === "connected") {
-      this.wsStatusBadge.style.color = "var(--accent-emerald)";
-      this.wsStatusBadge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+      this.wsStatusBadge.style.color = "#059669";
+      this.wsStatusBadge.style.background = "#edf8f2";
+      this.wsStatusBadge.style.borderColor = "rgba(91, 185, 140, 0.25)";
     } else if (status === "connecting") {
-      this.wsStatusBadge.style.color = "var(--accent-amber)";
-      this.wsStatusBadge.style.borderColor = "rgba(245, 158, 11, 0.3)";
+      this.wsStatusBadge.style.color = "#d97706";
+      this.wsStatusBadge.style.background = "#fef9ee";
+      this.wsStatusBadge.style.borderColor = "rgba(245, 158, 11, 0.25)";
     } else {
-      this.wsStatusBadge.style.color = "var(--accent-rose)";
-      this.wsStatusBadge.style.borderColor = "rgba(244, 63, 94, 0.3)";
+      this.wsStatusBadge.style.color = "#dc2626";
+      this.wsStatusBadge.style.background = "#fef2f2";
+      this.wsStatusBadge.style.borderColor = "rgba(248, 113, 113, 0.25)";
     }
     const textSpan = this.wsStatusBadge.querySelector(".status-text");
     if (textSpan) textSpan.innerText = text;
@@ -724,9 +727,9 @@ class VoiceAgentApp {
         this.canvasCtx.beginPath();
         this.canvasCtx.lineWidth = 2.5 - i * 0.5;
 
-        if (i === 0) this.canvasCtx.strokeStyle = "rgba(99, 102, 241, 0.4)";
-        else if (i === 1) this.canvasCtx.strokeStyle = "rgba(6, 182, 212, 0.5)";
-        else this.canvasCtx.strokeStyle = "rgba(168, 85, 247, 0.6)";
+        if (i === 0) this.canvasCtx.strokeStyle = "rgba(124, 92, 252, 0.3)";
+        else if (i === 1) this.canvasCtx.strokeStyle = "rgba(245, 158, 107, 0.35)";
+        else this.canvasCtx.strokeStyle = "rgba(91, 185, 140, 0.4)";
 
         for (let x = 0; x < width; x++) {
           const y = height / 2 + Math.sin(x * frequency + phase + i * 1.2) * amplitude * Math.sin((x / width) * Math.PI);
