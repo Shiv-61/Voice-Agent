@@ -73,19 +73,27 @@ async def get_index():
 @app.get("/api/system/status")
 async def get_system_status():
     """Checks the health of Ollama LLM, Sarvam AI API, Database, and Vector Store."""
-    # 1. Ollama status
-    ollama_status = "unavailable"
+    # 1. LLM status
+    llm_status = "unavailable"
+    provider_label = "OpenRouter (Cloud)" if config.LLM_PROVIDER == "openrouter" else "Ollama (Local)"
     active_model = config.LLM_MODEL
-    try:
-        r = requests.get("http://localhost:11434/api/tags", timeout=1.5)
-        if r.status_code == 200:
-            models = [m.get("name") for m in r.json().get("models", [])]
-            if any(config.LLM_MODEL in m for m in models):
-                ollama_status = "ready"
-            else:
-                ollama_status = f"connected (model {config.LLM_MODEL} not loaded)"
-    except Exception:
-        ollama_status = "offline"
+
+    if config.LLM_PROVIDER == "openrouter":
+        if config.OPENROUTER_API_KEY and len(config.OPENROUTER_API_KEY) > 10:
+            llm_status = "ready"
+        else:
+            llm_status = "missing API key"
+    else:
+        try:
+            r = requests.get("http://localhost:11434/api/tags", timeout=1.5)
+            if r.status_code == 200:
+                models = [m.get("name") for m in r.json().get("models", [])]
+                if any(config.LLM_MODEL in m for m in models):
+                    llm_status = "ready"
+                else:
+                    llm_status = f"connected (model {config.LLM_MODEL} not loaded)"
+        except Exception:
+            llm_status = "offline"
 
     # 2. Sarvam status
     sarvam_configured = bool(config.SARVAM_API_KEY and len(config.SARVAM_API_KEY) > 10)
@@ -99,9 +107,9 @@ async def get_system_status():
 
     return {
         "llm": {
-            "status": ollama_status,
+            "status": llm_status,
             "model": active_model,
-            "provider": "Ollama (Local)",
+            "provider": provider_label,
         },
         "sarvam_ai": {
             "configured": sarvam_configured,

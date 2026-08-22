@@ -1051,11 +1051,13 @@ class VoiceAgentApp {
       // LLM
       const llmPill = document.getElementById("diagLlmStatus");
       const llmModel = document.getElementById("diagLlmModel");
+      const llmProvider = document.getElementById("diagLlmProvider");
       if (llmPill) {
         llmPill.innerText = data.llm.status.toUpperCase();
         llmPill.className = `status-pill ${data.llm.status === "ready" ? "pill-green" : "pill-red"}`;
       }
       if (llmModel) llmModel.innerText = data.llm.model;
+      if (llmProvider && data.llm.provider) llmProvider.innerText = data.llm.provider;
 
       // Sarvam
       const sarvamPill = document.getElementById("diagSarvamStatus");

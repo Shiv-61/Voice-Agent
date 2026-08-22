@@ -35,11 +35,15 @@ SUPPORTED_LANGUAGES = {
 }
 DEFAULT_LANGUAGE = "en"               # fallback language code
 
-# ---- LLM (Ollama, local) ----
-OLLAMA_URL = "http://localhost:11434/api/chat"
-LLM_MODEL = "qwen2.5:3b"
-LLM_MAX_TOKENS = 250                 # more room for tool-call reasoning
-LLM_TEMPERATURE = 0.4                # lower for factual accuracy
+# ---- LLM Configuration ----
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").lower()  # openrouter | ollama
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+LLM_MODEL = os.getenv("LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "350"))                # more room for tool-call reasoning
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))               # lower for factual accuracy
 
 # ---- Conversation ----
 MAX_HISTORY_TURNS = 8
