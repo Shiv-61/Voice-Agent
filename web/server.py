@@ -377,8 +377,13 @@ class WebVoiceSession:
                 audio_bytes, language_code=self.language_code
             )
         except Exception as e:
+            err_str = str(e)
+            if "invalid_api_key" in err_str.lower() or "403" in err_str or "forbidden" in err_str.lower():
+                user_msg = "⚠️ Speech-to-Text Notice: Sarvam API key is invalid or expired. You can still type queries directly in the chat bar below!"
+            else:
+                user_msg = f"Speech-to-text error: {err_str}"
             print(f"[web-ws] STT error: {e}")
-            await self.ws.send_json({"event": "error", "message": f"STT failed: {str(e)}"})
+            await self.ws.send_json({"event": "error", "message": user_msg})
             return
 
         if not transcript.strip():

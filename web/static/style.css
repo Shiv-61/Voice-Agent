@@ -720,6 +720,18 @@ body {
   border-color: rgba(124, 92, 252, 0.15);
 }
 
+.error-bubble {
+  align-self: flex-start;
+  background: var(--accent-coral-light);
+  border: 1px solid var(--accent-coral);
+  color: #991b1b;
+  border-bottom-left-radius: 4px;
+}
+
+.error-bubble .speaker-name {
+  color: #991b1b;
+}
+
 /* Tool execution pill */
 .tool-pill {
   display: inline-flex;

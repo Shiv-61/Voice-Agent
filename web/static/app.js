@@ -333,22 +333,76 @@ class VoiceAgentApp {
 
   handleServerEvent(msg) {
     if (msg.event === "user_transcript") {
+      this.currentAgentBubbleContent = null;
       this.addMessageBubble("user", msg.text, msg.language);
       this.updateStateText(`Processing: "${msg.text}"`);
     } else if (msg.event === "agent_thinking") {
-      this.updateStateText("Reasoning with Qwen 2.5 + Querying Tools...");
+      this.currentAgentBubbleContent = null;
+      this.updateStateText("Reasoning with NVIDIA Nemotron 3 Ultra...");
     } else if (msg.event === "tool_executed") {
       // Render glowing tool execution pill in chat
       this.addToolExecutionPill(msg.tool, msg.args, msg.preview);
     } else if (msg.event === "agent_partial_text") {
-      this.updateStateText(`Agent speaking: "${msg.text}"`);
+      this.appendAgentPartialText(msg.text, msg.language);
+      this.updateStateText(`Agent speaking: "${msg.text.slice(0, 40)}..."`);
       this.interruptBtn.style.display = "inline-flex";
     } else if (msg.event === "agent_done") {
-      this.addMessageBubble("agent", msg.full_text, msg.language);
+      this.finalizeAgentText(msg.full_text, msg.language);
       this.updateStateText("Ready. Listening for next question...");
     } else if (msg.event === "empty_transcript") {
       this.updateStateText("Didn't catch that. Please speak again.");
+    } else if (msg.event === "error") {
+      this.addErrorBubble(msg.message || "An error occurred during processing.");
+      this.updateStateText("System Notice");
     }
+  }
+
+  appendAgentPartialText(text, lang = "") {
+    if (!this.messagesContainer) return;
+    if (!this.currentAgentBubbleContent) {
+      const bubble = document.createElement("div");
+      bubble.className = "message-bubble agent-bubble";
+      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      bubble.innerHTML = `
+        <div class="bubble-header">
+          <span class="speaker-name">🎓 UniVoice Assistant</span>
+          <span class="speaker-time">${timeStr}</span>
+        </div>
+        <div class="bubble-content"></div>
+      `;
+      this.messagesContainer.appendChild(bubble);
+      this.currentAgentBubbleContent = bubble.querySelector(".bubble-content");
+    }
+    if (this.currentAgentBubbleContent) {
+      const existing = this.currentAgentBubbleContent.innerText;
+      this.currentAgentBubbleContent.innerText = existing ? `${existing} ${text}` : text;
+      this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+    }
+  }
+
+  finalizeAgentText(fullText, lang = "") {
+    if (this.currentAgentBubbleContent) {
+      if (fullText) this.currentAgentBubbleContent.innerText = fullText;
+      this.currentAgentBubbleContent = null;
+    } else if (fullText) {
+      this.addMessageBubble("agent", fullText, lang);
+    }
+  }
+
+  addErrorBubble(message) {
+    if (!this.messagesContainer) return;
+    const bubble = document.createElement("div");
+    bubble.className = "message-bubble error-bubble";
+    const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    bubble.innerHTML = `
+      <div class="bubble-header">
+        <span class="speaker-name">⚠️ System Notice</span>
+        <span class="speaker-time">${timeStr}</span>
+      </div>
+      <div class="bubble-content">${message}</div>
+    `;
+    this.messagesContainer.appendChild(bubble);
+    this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
   }
 
   sendTextMessage(text) {
