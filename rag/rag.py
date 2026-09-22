@@ -14,11 +14,13 @@ import pypdf
 import chromadb
 from chromadb.config import Settings
 
+import config
+
 
 class RAGStore:
     def __init__(self, persist_dir: str | None = None):
         if persist_dir is None:
-            persist_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "db", "chroma_db")
+            persist_dir = config.CHROMA_PERSIST_DIR
         os.makedirs(persist_dir, exist_ok=True)
 
         self.persist_dir = persist_dir
@@ -31,6 +33,24 @@ class RAGStore:
             metadata={"description": "University admission brochures, rules, policies, and FAQs"},
         )
         print(f"[rag] Vector Store initialized at '{persist_dir}'. Active chunks: {self.collection.count()}")
+        self._auto_seed_sample_pdf()
+
+    def _auto_seed_sample_pdf(self):
+        """Auto-seeds default university policy document on initial launch if collection is empty."""
+        try:
+            if self.collection.count() == 0:
+                sample_pdf = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    "sample_university_policy.pdf",
+                )
+                if os.path.exists(sample_pdf):
+                    with open(sample_pdf, "rb") as f:
+                        content = f.read()
+                    self.ingest_pdf(content, "sample_university_policy.pdf")
+                    print("[rag] Auto-seeded sample university policy document into vector store.")
+        except Exception as e:
+            print(f"[rag] Auto-seed notice: {e}")
+
 
     def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
         """Splits text into overlapping chunks respecting sentence boundaries."""

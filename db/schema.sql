@@ -49,6 +49,18 @@ CREATE TABLE IF NOT EXISTS admission_info (
     last_date_to_apply VARCHAR(50) NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS call_logs (
+    id SERIAL PRIMARY KEY,
+    call_id VARCHAR(20) NOT NULL UNIQUE,
+    caller_number VARCHAR(20) DEFAULT 'Web',
+    language VARCHAR(10) DEFAULT 'en-IN',
+    started_at VARCHAR(30) NOT NULL,
+    ended_at VARCHAR(30),
+    duration_seconds INT DEFAULT 0,
+    queries_json TEXT DEFAULT '[]',
+    status VARCHAR(20) DEFAULT 'ongoing'
+);
+
 -- Seed Data
 INSERT INTO departments (department_id, department_name) VALUES
 ('CSE', 'Computer Science & Engineering'),

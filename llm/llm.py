@@ -13,14 +13,34 @@ import config
 from db.database import Database
 from rag import RAGStore
 
-SYSTEM_PROMPT = """\
-You are a polite, helpful, and clear University Admission & Student Desk Assistant speaking on a real-time voice call with a student's parent or prospective student.
+WELCOME_MESSAGE = "Hello, yah ek AI call hai krupiya apni bhasha select kare english/hindi/gujarati"
 
-Key Responsibilities & Rules:
-1. Answer queries regarding Admission process, Eligibility, Fees, Deadlines, Campus Placements, Hostel/Campus Rules, Scholarships, and specific Student Marks or Attendance.
-2. Voice Call Conversational Style: Use short sentences, natural phrasing, and a polite, helpful tone. Never use markdown formatting (no asterisks, bold text, bullet points, numbered lists, or hashtags) because your response will be read aloud by Text-To-Speech.
-3. Language: Respond in the exact language spoken by the user (English, Hindi, or Gujarati).
-4. Tool Calling: If you need information from the university database or uploaded policy documents to answer, call a tool using this exact format:
+SYSTEM_PROMPT = """\
+You are a polite, helpful, and professional University Admission & Student Desk Assistant for the DDU IT (Dharamsinh Desai University Information Technology) branch speaking on a real-time voice call with a caller (student, parent, or applicant).
+
+CALL INITIATION & WELCOME MESSAGE FLOW:
+1. The voice call opens with your initial welcome message:
+   "Hello, yah ek AI call hai krupiya apni bhasha select kare english/hindi/gujarati"
+2. When the caller indicates or selects their language (or speaks in English, Hindi, or Gujarati), you MUST immediately greet and introduce yourself in that chosen language:
+   - For Hindi: "Namaste, Me DDU IT branch ki assistant bol rhi hu me apki kya madad kar sakti hu?" (or "नमस्ते, मैं DDU IT ब्रांच की असिस्टेंट बोल रही हूँ, मैं आपकी क्या मदद कर सकती हूँ?")
+   - For English: "Hello, I am the assistant from DDU IT branch. How may I assist you today?"
+   - For Gujarati: "Namaste, Hu DDU IT branch ni assistant boli rahi chu, hu tamari shu madad kari shaku?" (or "નમસ્તે, હું DDU IT બ્રાન્ચની આસિસ્ટન્ટ બોલી રહી છું, હું તમારી શું મદદ કરી શકું?")
+3. Once the language is chosen, conduct the entire rest of the conversation in that chosen language. Answer questions regarding DDU IT branch admissions, eligibility, fees, syllabus, placements, hostel rules, and student records.
+
+STRICT SAFETY & ANTI-ABUSE GUARDRAIL:
+4. NEVER USE OR REPEAT ABUSIVE LANGUAGE: You must NEVER speak, generate, repeat, or acknowledge any abusive, profane, vulgar, offensive, discriminatory, or inappropriate words under any circumstances, even if insulted, baited, or asked by the caller. Maintain unwavering professionalism, respect, and calm courtesy at all times.
+
+STRICT UNAWARE / UNKNOWN FALLBACK RULE:
+5. IF NOT AWARE OF ANYTHING: If you are not aware of the requested information, do not know the answer, or if the information is not found in the university database or policy documents, you MUST NOT fabricate or guess. You MUST respond with ONLY this exact sentence in the caller's language:
+   - For English: "I don't have that info. thank you."
+   - For Hindi: "मेरे पास वह जानकारी नहीं है। धन्यवाद।"
+   - For Gujarati: "મારી પાસે તે માહિતી નથી. આભાર."
+
+VOICE CALL STYLE & CONVERSATIONAL RULES:
+6. SHORT SPOKEN SENTENCES: Speak naturally in 1 to 3 short sentences. Never use markdown formatting (no asterisks, bold, bullet points, numbers, or hashtags) because your answer will be synthesized directly into speech.
+7. EXACT LANGUAGE MATCHING: Always respond in the exact language spoken by the caller (English, Hindi, or Gujarati).
+8. CONTEXT CONTINUITY: Use the conversation history provided with each prompt to understand follow-up questions, pronouns, and references (such as "what about his fees?", "when does it start?").
+9. TOOL CALLING: If you need to look up facts from the official university database or policy files, output:
    TOOL_CALL: tool_name(param="value")
 
    Available Tools:
@@ -31,16 +51,46 @@ Key Responsibilities & Rules:
    - get_admission_info(program="CSE/ECE/MTech or empty") -> Retrieves eligibility, fee structure, & application deadline.
    - search_university_docs(query="keywords or topic") -> Searches unstructured university prospectus, hostel rules, scholarship guidelines, campus policies, and PDF documents.
 
-5. If a parent asks for student marks/attendance without providing student name or ID, politely ask for the student's name or Student ID first.
-6. When tool results are provided to you, summarize them concisely in 2-3 spoken sentences.
+10. If a caller asks about student marks or attendance without providing the student's name or ID, politely ask for their name or ID first.
+11. When tool results are provided, synthesize them into a concise spoken answer in 2-3 sentences.
 """
+
+CALL_HANGUP_PROMPT = """\
+You are an intelligent call supervisor analyzing a voice call between a caller and a university voice assistant.
+Determine whether the caller or the conversation has concluded and the telephone call should be hung up.
+
+Instructions:
+- Return {"call_hangup": true} if the caller indicates they want to end the call, says goodbye, thanks the assistant to end the conversation, says they have no more questions, or asks to hang up. Examples: "bye", "goodbye", "thank you that is all", "have a nice day", "no other questions", "अलविदा", "धन्यवाद, बस यही जानना था", "फोन रख दो", "આવજો", "આભાર, બસ આટલું જ", "hang up", "cut the call", "disconnect".
+- Return {"call_hangup": false} if the caller is continuing the call, asking questions, giving details, greeting, or clarifying.
+
+You MUST respond ONLY with a raw, valid JSON object in this exact schema:
+{"call_hangup": true}
+or
+{"call_hangup": false}
+Do not write any markdown, code fences, or any other text.
+"""
+
+
+def transform_query(user_text: str) -> str:
+    """
+    Transforms and sanitizes user input before passing to LLM.
+    Removes unprintable control characters and normalizes whitespace.
+    """
+    if not user_text:
+        return ""
+    cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', user_text)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
 
 
 class LLM:
     def __init__(self):
         self.db = Database()
         self.rag = RAGStore()
-        self.history: list[dict[str, str]] = []
+        # Initialize conversation history with the assistant's opening welcome message
+        self.history: list[dict[str, str]] = [
+            {"role": "assistant", "content": WELCOME_MESSAGE}
+        ]
 
     def _trim_history(self):
         max_msgs = config.MAX_HISTORY_TURNS * 2
@@ -107,14 +157,107 @@ class LLM:
 
         return tool_name, kwargs
 
+    def _format_conversation_history(self) -> str:
+        """Formats preceding conversation history into an explicit readable transcript."""
+        if not self.history:
+            return ""
+        lines = ["\n[PREVIOUS CALL CHAT HISTORY]"]
+        for turn in self.history:
+            role_label = "Caller" if turn["role"] == "user" else "Assistant"
+            lines.append(f"{role_label}: {turn['content']}")
+        lines.append("[END OF CHAT HISTORY]\n")
+        return "\n".join(lines)
+
+    def check_call_hangup(self, user_text: str) -> bool:
+        """
+        Executes the CALL_HANGUP_PROMPT to evaluate whether caller intends to end the call.
+        Returns True if the call must end, False if it must continue.
+        """
+        clean_text = user_text.strip().lower()
+        if not clean_text:
+            return False
+
+        # Fast-track obvious hangup words for instant response
+        fast_hangup = {
+            "bye", "goodbye", "bye bye", "bye-bye", "good bye",
+            "hang up", "hangup", "disconnect", "cut the call", "end call",
+            "अलविदा", "આવજો"
+        }
+        if clean_text in fast_hangup:
+            print(f"[llm-hangup] Fast-path hangup matched for: '{user_text}' -> call_hangup: True")
+            return True
+
+        recent_context = ""
+        if self.history:
+            recent_context = f"Previous turn: Assistant said: \"{self.history[-1]['content']}\"\n"
+
+        prompt_payload = f"{recent_context}Caller said: \"{user_text}\"\nDetermine whether call_hangup is true or false."
+
+        messages = [
+            {"role": "system", "content": CALL_HANGUP_PROMPT},
+            {"role": "user", "content": prompt_payload},
+        ]
+
+        try:
+            if config.LLM_PROVIDER == "openrouter":
+                headers = {
+                    "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": config.LLM_MODEL,
+                    "messages": messages,
+                    "temperature": 0.0,
+                    "max_tokens": 200,
+                }
+                resp = requests.post(config.OPENROUTER_URL, headers=headers, json=payload, timeout=8)
+                resp.raise_for_status()
+                raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            else:
+                payload = {
+                    "model": config.LLM_MODEL,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"temperature": 0.0, "num_predict": 200},
+                }
+                resp = requests.post(config.OLLAMA_URL, json=payload, timeout=8)
+                resp.raise_for_status()
+                raw = resp.json().get("message", {}).get("content", "")
+
+            # Parse JSON
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+            match = re.search(r"\{.*?\}", raw, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(0))
+                val = bool(parsed.get("call_hangup", False))
+                print(f"[llm-hangup] Call hangup JSON evaluated: {parsed} -> {val}")
+                return val
+        except Exception as e:
+            print(f"[llm-hangup] Notice during hangup evaluation: {e}")
+
+        return False
+
     def reply_stream(self, user_text: str) -> Generator[str, None, None]:
         """
         Yields response text incrementally. Handles multi-turn tool execution transparently.
+        Appends conversation history to each LLM prompt to maintain context.
         """
-        self.history.append({"role": "user", "content": user_text})
+        clean_user_text = transform_query(user_text)
+
+        # Appending previous chats to the prompt so context is never forgotten
+        history_context = self._format_conversation_history()
+        if history_context:
+            prompt_with_history = f"{history_context}\nCaller's Current Question: {clean_user_text}"
+        else:
+            prompt_with_history = clean_user_text
+
+        self.history.append({"role": "user", "content": clean_user_text})
         self._trim_history()
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_with_history},
+        ]
 
         max_tool_iterations = 3
         current_iteration = 0

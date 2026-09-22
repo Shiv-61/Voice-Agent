@@ -77,14 +77,17 @@ class TTS:
 
     def speak_local(self, text: str, language_code: str = "en-IN"):
         """Synthesize and play through local speakers (CLI mode only)."""
-        import sounddevice as sd
-        import soundfile as sf
-        import io
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+            import io
 
-        audio_bytes = self.synthesize(text, language_code)
-        if not audio_bytes:
-            return
+            audio_bytes = self.synthesize(text, language_code)
+            if not audio_bytes:
+                return
 
-        audio_data, sample_rate = sf.read(io.BytesIO(audio_bytes))
-        sd.play(audio_data, sample_rate)
-        sd.wait()
+            audio_data, sample_rate = sf.read(io.BytesIO(audio_bytes))
+            sd.play(audio_data, sample_rate)
+            sd.wait()
+        except Exception as err:
+            print(f"[tts] Local audio device error (headless environment?): {err}")

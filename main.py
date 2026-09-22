@@ -19,7 +19,7 @@ import uvicorn
 
 import config
 from stt import STT
-from llm import LLM
+from llm.llm import LLM, WELCOME_MESSAGE
 from tts import TTS
 
 SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
@@ -46,42 +46,56 @@ def run_cli_mode():
     print("Supports queries in English, Hindi, and Gujarati.")
     print("Press Ctrl+C to exit.\n")
 
+    # Speak initial welcome greeting
+    print(f"🤖 Agent: {WELCOME_MESSAGE}\n")
+    try:
+        tts.speak_local(WELCOME_MESSAGE, language_code="hi-IN")
+    except Exception as e:
+        print(f"[cli] Notice playing welcome audio: {e}")
+
     current_language = config.DEFAULT_LANGUAGE
 
     try:
         while True:
-            input("🎙️ Press Enter to start speaking...")
-            print("🔴 Recording... Press Enter again to stop.")
+            prompt = input("\n🎙️  Press [Enter] to speak via mic (or type your question): ").strip()
+            if prompt:
+                user_text = prompt
+                detected_lang = current_language
+            else:
+                print("🔴 Recording from mic... Speak now! Press [Enter] to stop.")
+                frames = []
 
-            frames = []
+                def callback(indata, frame_count, time_info, status):
+                    frames.append(indata.copy())
 
-            def callback(indata, frame_count, time_info, status):
-                frames.append(indata.copy())
+                stream = sd.InputStream(
+                    samplerate=16000, channels=1, dtype="float32", callback=callback
+                )
+                with stream:
+                    input()
 
-            stream = sd.InputStream(
-                samplerate=16000, channels=1, dtype="float32", callback=callback
-            )
-            with stream:
-                input()
+                if not frames:
+                    print("(didn't catch anything, try again)")
+                    continue
 
-            if not frames:
-                print("(didn't catch anything, try again)")
-                continue
+                audio_np = np.concatenate(frames, axis=0).flatten()
+                audio_bytes = stt.numpy_to_wav_bytes(audio_np, sample_rate=16000)
 
-            audio_np = np.concatenate(frames, axis=0).flatten()
-            audio_bytes = stt.numpy_to_wav_bytes(audio_np, sample_rate=16000)
+                print(f"⏳ Transcribing with {stt.provider}...")
+                user_text, detected_lang = stt.transcribe(
+                    audio_bytes, language_code="unknown"
+                )
 
-            print("⏳ Transcribing with Sarvam...")
-            user_text, detected_lang = stt.transcribe(
-                audio_bytes, language_code="unknown"
-            )
-
-            if not user_text:
-                print("(didn't catch anything, try again)")
-                continue
+                if not user_text:
+                    print("(didn't catch any words, please try again)")
+                    continue
 
             current_language = detected_lang or current_language
-            print(f"🧑 User [{current_language}]: {user_text}")
+            print(f"\n🧑 User [{current_language}]: {user_text}")
+
+            # Check call hangup prompt ({call_hangup: true/false})
+            is_hangup = llm.check_call_hangup(user_text)
+
             print("🤖 Agent: ", end="", flush=True)
 
             buffer = ""
@@ -97,6 +111,10 @@ def run_cli_mode():
                 tts.speak_local(buffer.strip(), language_code=current_language)
 
             print("\n")
+
+            if is_hangup:
+                print("📞 [Call Supervisor] Call ended by caller ({call_hangup: true}). Goodbye!\n")
+                break
 
     except KeyboardInterrupt:
         print("\n👋 Call ended.")

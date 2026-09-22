@@ -3,6 +3,8 @@ Database layer for University Admission & Student Info Agent.
 Supports PostgreSQL (via psycopg2) with fallback to SQLite for local development.
 """
 
+import datetime
+import json
 import os
 import sqlite3
 import config
@@ -20,11 +22,13 @@ class Database:
         self.use_sqlite = False
         self.conn = None
 
-        if PSYCOPG2_AVAILABLE:
+        if PSYCOPG2_AVAILABLE and config.DATABASE_URL:
             try:
                 self.conn = psycopg2.connect(config.DATABASE_URL)
                 self.conn.autocommit = True
                 print("[db] Connected to PostgreSQL database.")
+                self._init_postgres_schema()
+                self.close_stale_calls()
                 return
             except Exception as e:
                 print(f"[db] PostgreSQL connection failed ({e}). Falling back to SQLite.")
@@ -35,7 +39,22 @@ class Database:
         self.conn = sqlite3.connect(sqlite_db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_sqlite_schema()
+        self.close_stale_calls()
         print("[db] Connected to SQLite database.")
+
+    def _init_postgres_schema(self):
+        """Initializes PostgreSQL schema and seed data if empty."""
+        schema_file = os.path.join(os.path.dirname(__file__), "schema.sql")
+        if os.path.exists(schema_file):
+            try:
+                with open(schema_file, "r", encoding="utf-8") as f:
+                    sql_script = f.read()
+                cursor = self.conn.cursor()
+                cursor.execute(sql_script)
+                print("[db] PostgreSQL schema and seed data verified.")
+            except Exception as err:
+                print(f"[db] PostgreSQL schema init notice: {err}")
+
 
     def _init_sqlite_schema(self):
         """Initializes local SQLite schema and populates seed data if empty."""
@@ -48,7 +67,17 @@ class Database:
             sql_script = sql_script.replace("ON CONFLICT DO NOTHING", "")
             sql_script = sql_script.replace("INSERT INTO", "INSERT OR IGNORE INTO")
             cursor = self.conn.cursor()
-            cursor.executescript(sql_script)
+            # Always ensure tables exist; seed rows only on a fresh (empty) DB.
+            # Seed tables have no UNIQUE constraint, so re-running INSERTs on
+            # every startup would duplicate rows.
+            if "-- Seed Data" in sql_script:
+                schema_part, seed_part = sql_script.split("-- Seed Data", 1)
+            else:
+                schema_part, seed_part = sql_script, ""
+            cursor.executescript(schema_part)
+            student_count = cursor.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+            if seed_part and student_count == 0:
+                cursor.executescript(seed_part)
             self.conn.commit()
 
     def _execute_query(self, query: str, params: tuple = ()) -> list[dict]:
@@ -190,6 +219,12 @@ class Database:
             """
             cursor.execute(insert_student_sql, (student_id, name, department_id, semester, parent_phone))
 
+            # Replace (not append) this student's marks/attendance so
+            # re-saving a student never stacks up duplicate rows.
+            del_ph = "?" if self.use_sqlite else "%s"
+            cursor.execute(f"DELETE FROM marks WHERE student_id = {del_ph}", (student_id,))
+            cursor.execute(f"DELETE FROM attendance WHERE student_id = {del_ph}", (student_id,))
+
             # 2. Insert marks
             if marks_list:
                 for m in marks_list:
@@ -229,3 +264,103 @@ class Database:
         except Exception as e:
             print(f"[db] Add student error: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Call History Logging
+    # ------------------------------------------------------------------
+
+    def log_call_start(self, call_id: str, caller_number: str = "Web", language: str = "en-IN") -> bool:
+        """Opens a new call log entry when a voice call begins."""
+        started_at = datetime.datetime.utcnow().isoformat()
+        query = """
+            INSERT INTO call_logs (call_id, caller_number, language, started_at, status)
+            VALUES (?, ?, ?, ?, 'ongoing')
+        """ if self.use_sqlite else """
+            INSERT INTO call_logs (call_id, caller_number, language, started_at, status)
+            VALUES (%s, %s, %s, %s, 'ongoing')
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(query, (call_id, caller_number, language, started_at))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] log_call_start error: {e}")
+            return False
+
+    def log_call_query(self, call_id: str, query_text: str) -> bool:
+        """Appends a caller query (purpose) to an open call log entry."""
+        if not call_id or not (query_text or "").strip():
+            return False
+        ph = "?" if self.use_sqlite else "%s"
+        try:
+            rows = self._execute_query(
+                f"SELECT queries_json FROM call_logs WHERE call_id = {ph}", (call_id,)
+            )
+            if not rows:
+                return False
+            try:
+                queries = json.loads(rows[0].get("queries_json") or "[]")
+            except Exception:
+                queries = []
+            queries.append({
+                "text": query_text.strip(),
+                "at": datetime.datetime.utcnow().isoformat(),
+            })
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"UPDATE call_logs SET queries_json = {ph} WHERE call_id = {ph}",
+                (json.dumps(queries), call_id),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] log_call_query error: {e}")
+            return False
+
+    def log_call_end(self, call_id: str) -> bool:
+        """Closes a call log entry, stamping end time and duration."""
+        if not call_id:
+            return False
+        ph = "?" if self.use_sqlite else "%s"
+        try:
+            rows = self._execute_query(
+                f"SELECT started_at FROM call_logs WHERE call_id = {ph}", (call_id,)
+            )
+            if not rows:
+                return False
+            try:
+                started = datetime.datetime.fromisoformat(rows[0]["started_at"])
+                duration = max(0, int((datetime.datetime.utcnow() - started).total_seconds()))
+            except Exception:
+                duration = 0
+            ended_at = datetime.datetime.utcnow().isoformat()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"UPDATE call_logs SET ended_at = {ph}, duration_seconds = {ph}, status = 'completed' WHERE call_id = {ph}",
+                (ended_at, duration, call_id),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] log_call_end error: {e}")
+            return False
+
+    def close_stale_calls(self) -> None:
+        """Marks calls left open (e.g. by a server restart) as interrupted."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE call_logs SET ended_at = started_at, duration_seconds = 0, status = 'interrupted' WHERE ended_at IS NULL"
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"[db] close_stale_calls notice: {e}")
+
+    def get_call_history(self, limit: int = 50) -> list[dict]:
+        """Returns call log entries, most recent calls first."""
+        ph = "?" if self.use_sqlite else "%s"
+        return self._execute_query(
+            f"SELECT call_id, caller_number, language, started_at, ended_at, duration_seconds, queries_json, status FROM call_logs ORDER BY started_at DESC LIMIT {ph}",
+            (limit,),
+        )
