@@ -101,6 +101,30 @@ def get_shared_rag():
     return _shared_rag
 
 
+_MULTILINGUAL_EXPANSIONS = {
+    r'(?:admission|एडमिशन|प्रवेश|दाखिला|દાખલ|એડમિશન|apply|आवेदन|અરજી)': 'admission apply eligibility requirements',
+    r'(?:eligibility|एलिजिबिलिटी|पात्रता|લાયકાત|eligible|योग्य)': 'eligibility criteria requirements percentage',
+    r'(?:fees?|फी|फीस|शुल्क|ખર્ચ|ફી|cost)': 'fee structure tuition fees annual',
+    r'(?:b\.?tech|बीटेक|बी\.टेक|બીટેક|engineering|इंजीनियरिंग)': 'B.Tech Bachelor of Technology Engineering',
+    r'(?:cse|it|computer|कम्प्यूटर|कंप्यूटर|કોમ્પ્યુટર|ઇન્ફોર્મેશન)': 'Computer Science Engineering Information Technology IT',
+    r'(?:ddu|डीडीयू|धर्मसिंह|ધરમસિંહ)': 'DDU Dharamsinh Desai University Nadiad',
+    r'(?:attendance|अटेंडेंस|हाजिरी|उपस्थिति|હાજરી)': 'attendance policy minimum percentage rules',
+    r'(?:placement|प्लेसमेंट|नौकरी|पैकेज|सैलरी|પ્લેસમેન્ટ|salary|package)': 'placement highest average package recruiters companies',
+    r'(?:hostel|हॉस्टल|छात्रावास|હોસ્ટેલ)': 'hostel timings curfew accommodation rules',
+    r'(?:scholarship|स्कॉलरशिप|छात्रवृत्ति|સ્કોલરશિપ)': 'scholarship merit financial aid',
+    r'(?:syllabus|सिलेबस|पाठ्यक्रम|अभ्यासक्रम|विषय)': 'syllabus semester subjects curriculum',
+}
+
+def expand_multilingual_query(text: str) -> str:
+    """Expands multilingual voice queries with English semantic tokens for ChromaDB indexing."""
+    terms = [text]
+    lower = text.lower()
+    for pattern, eng_equiv in _MULTILINGUAL_EXPANSIONS.items():
+        if re.search(pattern, lower):
+            terms.append(eng_equiv)
+    return " ".join(terms)
+
+
 class LLM:
     def __init__(self, db=None, rag=None):
         self.db = db or get_shared_db()
@@ -120,9 +144,10 @@ class LLM:
 
         context_snippets = []
 
-        # 1. Anticipatory RAG query (PDF brochures, hostel, rules, syllabus, scholarships, etc.)
+        # 1. Anticipatory RAG query with multilingual semantic expansion
         try:
-            matches = self.rag.query_documents(clean_user_text, n_results=2)
+            rag_query = expand_multilingual_query(clean_user_text)
+            matches = self.rag.query_documents(rag_query, n_results=2)
             if matches and matches[0].get("similarity_score", 0) >= 0.25:
                 for m in matches:
                     text_snippet = m.get("text", "").strip()
@@ -132,30 +157,41 @@ class LLM:
         except Exception as e:
             print(f"[llm] Anticipatory RAG notice: {e}")
 
-        # 2. Anticipatory DB check for admission or placement
+        # 2. Anticipatory DB check for admission or placement (English, Hindi, Gujarati)
         try:
             lower_text = clean_user_text.lower()
-            if any(k in lower_text for k in ["placement", "package", "recruiter", "salary", "placed"]):
+            if any(k in lower_text for k in [
+                "placement", "package", "recruiter", "salary", "placed",
+                "प्लेसमेंट", "नौकरी", "पैकेज", "सैलरी", "પ્લેસમેન્ટ"
+            ]):
                 stats = self.db.get_placement_stats()
                 if stats:
                     context_snippets.append(f"[Official Placement Records]: {json.dumps(stats)}")
-            if any(k in lower_text for k in ["admission", "eligibility", "fee", "fees", "apply", "deadline", "course"]):
-                prog = "CSE" if any(p in lower_text for p in ["cse", "computer", "it"]) else "ECE" if "ece" in lower_text else ""
+
+            if any(k in lower_text for k in [
+                "admission", "eligibility", "fee", "fees", "apply", "deadline", "course",
+                "एडमिशन", "प्रवेश", "दाखिला", "फी", "फीस", "शुल्क", "पात्रता", "एलिजिबिलिटी",
+                "बीटेक", "बी.टेक", "એડમિશન", "ફી", "લાયકાત"
+            ]):
+                prog = "CSE" if any(p in lower_text for p in [
+                    "cse", "computer", "it", "btech", "b.tech", "बीटेक", "बी.टेक", "कंप्यूटर", "કોમ્પ્યુટર", "બીટેક"
+                ]) else "ECE" if any(p in lower_text for p in ["ece", "electronics", "ईसीई", "इलेक्ट्रॉनिक्स"]) else ""
                 adm = self.db.get_admission_info(prog)
                 if adm:
                     context_snippets.append(f"[Official Admission & Fee Records]: {json.dumps(adm)}")
-            # Student ID pattern (e.g., STU001)
+
+            # Student ID pattern (e.g., STU001 or STU101)
             stu_match = re.search(r'\b(stu\d{3})\b', lower_text)
             if stu_match:
                 stu_id = stu_match.group(1).upper()
                 student = self.db.lookup_student(stu_id)
                 if student:
                     context_snippets.append(f"[Student Record {stu_id}]: {json.dumps(student)}")
-                if any(w in lower_text for w in ["mark", "grade", "score", "result"]):
+                if any(w in lower_text for w in ["mark", "grade", "score", "result", "मार्क्स", "रिजल्ट", "नंबर", "ગુણ"]):
                     marks = self.db.get_student_marks(stu_id)
                     if marks:
                         context_snippets.append(f"[Student Marks {stu_id}]: {json.dumps(marks)}")
-                if any(w in lower_text for w in ["attendance", "present", "absent"]):
+                if any(w in lower_text for w in ["attendance", "present", "absent", "हाजिरी", "अटेंडेंस", "उपस्थिति", "હાજરી"]):
                     att = self.db.get_student_attendance(stu_id)
                     if att:
                         context_snippets.append(f"[Student Attendance {stu_id}]: {json.dumps(att)}")

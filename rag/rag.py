@@ -168,7 +168,7 @@ class RAGStore:
                 formatted_results.append({
                     "text": doc,
                     "metadata": meta,
-                    "similarity_score": round(max(0.0, 1.0 - (dist if dist is not None else 0.0)), 3),
+                    "similarity_score": round(max(0.0, 1.0 - ((dist if dist is not None else 0.0) / 2.0)), 3),
                 })
 
         return formatted_results
