@@ -15,6 +15,13 @@ Modes:
 import argparse
 import re
 import sys
+
+# Ensure UTF-8 stdout and stderr encoding on Windows
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import uvicorn
 
 import config
@@ -22,15 +29,7 @@ from stt import STT
 from llm.llm import LLM, WELCOME_MESSAGE
 from tts import TTS
 
-SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
-
-
-def split_ready_sentences(buffer: str):
-    parts = SENTENCE_END.split(buffer)
-    if len(parts) <= 1:
-        return [], buffer
-    *complete, remainder = parts
-    return complete, remainder
+from utils import split_ready_sentences
 
 
 def run_cli_mode():

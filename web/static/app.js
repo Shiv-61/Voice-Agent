@@ -20,17 +20,26 @@ class VoiceAgentApp {
     this.callStartTime = null;
     this.callTimerInterval = null;
 
-    // Auto-VAD threshold & timer state
-    this.vadThreshold = 0.009; // Filters mouse clicks and ambient hum
+    // Auto-VAD threshold & adaptive noise tracking state
+    this.noiseFloor = 0.012;
+    this.minSpeechThreshold = 0.024;
+    this.vadThreshold = 0.024;
+    this.consecutiveSpeechFrames = 0;
+    this.requiredSpeechFrames = 2; // ~170ms of sustained speech energy
+    this.consecutiveBargeInFrames = 0;
+    this.requiredBargeInFrames = 3; // ~250ms of sustained loud speech to barge in
     this.vadSilenceTimer = null;
-    this.vadSilenceDuration = 2000; // Exactly 2 seconds silence before agent starts answering
+    this.vadSilenceDuration = 550; // 550ms turn completion
     this.isSpeechDetected = false;
     this.callStartupGrace = 0;
+    this.playbackStartTime = 0;
 
-    // Audio Playback Queue
+    // Audio Playback Queue with Gapless Scheduling
     this.playbackQueue = [];
     this.isPlayingAudio = false;
-    this.currentAudioSource = null;
+    this.activeAudioSources = [];
+    this.nextAudioStartTime = 0;
+    this.workletSupported = false;
 
     // Canvas animation
     this.canvas = document.getElementById("waveformCanvas");
@@ -388,6 +397,10 @@ class VoiceAgentApp {
       this.updateStateText(
         `Checking records for: "${msg.text.length > 60 ? msg.text.slice(0, 60) + "…" : msg.text}"`,
       );
+    } else if (msg.event === "agent_filler") {
+      this.updateStateText("Checking official university records…");
+      this.micOrb.classList.add("agent-speaking");
+      this.interruptBtn.style.display = "inline-flex";
     } else if (msg.event === "agent_thinking") {
       this.updateStateText(
         "Checking official records and preparing your answer…",
@@ -421,6 +434,9 @@ class VoiceAgentApp {
       this.interruptAgent();
       this.updateStateText("Listening — please speak your question.");
     } else if (msg.event === "empty_transcript") {
+      if (msg.had_filler && this.isPlayingAudio) {
+        this.interruptAgent();
+      }
       const dur = msg.duration ? `(${msg.duration.toFixed(1)}s)` : "";
       const rms = msg.rms !== undefined ? msg.rms : 0;
       let hint = "Didn't catch any words in that audio.";
@@ -472,12 +488,25 @@ class VoiceAgentApp {
             ? new Date(c.started_at).toLocaleString()
             : "—";
           const ongoing = !c.ended_at;
+          const intent = c.intent || "Admission & General";
+          const lead = c.lead_status || "Prospective Applicant";
+          const summary = c.summary || purpose;
+          const sentimentIcon = c.sentiment === "Positive" ? "😊" : c.sentiment === "Frustrated" ? "⚠️" : "💬";
+
           return `
           <tr>
             <td><code class="mono">${this.escapeHtml(c.call_id || "")}</code></td>
             <td>${this.escapeHtml(c.caller_number || "Web")}</td>
-            <td>${ongoing ? "Ongoing" : this.formatDuration(c.duration_seconds || 0)}</td>
-            <td class="query-cell" title="${purpose}">${purpose}</td>
+            <td>${ongoing ? '<span class="tag">Ongoing</span>' : this.formatDuration(c.duration_seconds || 0)}</td>
+            <td>
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                <span class="tag" style="font-size:0.75rem;">${sentimentIcon} ${this.escapeHtml(intent)}</span>
+                <span class="muted small">${this.escapeHtml(lead)}</span>
+              </div>
+            </td>
+            <td class="query-cell" title="${this.escapeHtml(summary)}">
+              <span style="font-size:0.85rem; line-height:1.3;">${this.escapeHtml(summary)}</span>
+            </td>
             <td class="muted small">${when}</td>
           </tr>
         `;
@@ -656,6 +685,16 @@ class VoiceAgentApp {
     if (this.audioContext.state === "suspended") {
       await this.audioContext.resume();
     }
+    // Attempt to register high-performance AudioWorklet for off-main-thread processing
+    try {
+      if (this.audioContext.audioWorklet) {
+        await this.audioContext.audioWorklet.addModule("/static/audio-processor.js");
+        this.workletSupported = true;
+      }
+    } catch (err) {
+      console.warn("AudioWorklet module notice, fallback processor enabled:", err);
+      this.workletSupported = false;
+    }
     this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -680,17 +719,12 @@ class VoiceAgentApp {
       this.processorNode = null;
     }
 
-    const bufferSize = 4096;
-    this.processorNode = this.audioContext.createScriptProcessor(
-      bufferSize,
-      1,
-      1,
-    );
-    window.__vadProcessor = this.processorNode; // Prevent garbage collection in Firefox
     this.audioChunks = [];
     this.isSpeechDetected = false;
+    this.consecutiveSpeechFrames = 0;
+    this.consecutiveBargeInFrames = 0;
 
-    this.processorNode.onaudioprocess = (e) => {
+    const handleAudioFrame = (input, rms) => {
       if (
         !this.isCallActive ||
         this.callMode !== "auto_vad" ||
@@ -698,77 +732,136 @@ class VoiceAgentApp {
       )
         return;
 
+      // Slowly track background noise floor when user isn't speaking and agent isn't playing
+      if (!this.isSpeechDetected && !this.isPlayingAudio) {
+        this.noiseFloor = this.noiseFloor * 0.95 + rms * 0.05;
+      }
+
+      // Dynamic speech threshold anchored safely above room noise floor
+      const dynamicSpeechThreshold = Math.max(
+        this.minSpeechThreshold,
+        this.noiseFloor * 2.5 + 0.012,
+      );
+
+      // --- BARGE-IN: If customer speaks while agent is speaking, stop agent immediately ---
+      if (this.isPlayingAudio) {
+        const playbackElapsed = Date.now() - (this.playbackStartTime || 0);
+        const bargeInThreshold = Math.max(0.045, dynamicSpeechThreshold * 1.8);
+
+        // 350ms playback start grace period to reject speaker turn-on sound
+        if (playbackElapsed > 350 && rms > bargeInThreshold) {
+          this.consecutiveBargeInFrames++;
+          if (this.consecutiveBargeInFrames >= this.requiredBargeInFrames) {
+            console.log(
+              `🛑 Caller interrupted while agent was speaking (RMS: ${rms.toFixed(3)} > ${bargeInThreshold.toFixed(3)}). Stopping agent playback.`,
+            );
+            this.interruptAgent();
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(JSON.stringify({ event: "interrupt" }));
+            }
+            this.isSpeechDetected = true;
+            this.consecutiveSpeechFrames = this.requiredSpeechFrames;
+            this.micOrb.classList.add("active");
+            this.updateStateText(
+              "Listening — I stopped speaking, please go ahead.",
+            );
+            this.audioChunks = [new Float32Array(input)];
+            if (this.vadSilenceTimer) {
+              clearTimeout(this.vadSilenceTimer);
+              this.vadSilenceTimer = null;
+            }
+          }
+        } else {
+          this.consecutiveBargeInFrames = 0;
+        }
+        return;
+      }
+
+      this.consecutiveBargeInFrames = 0;
+
+      // --- SPEECH DETECTION ---
+      if (rms > dynamicSpeechThreshold) {
+        this.consecutiveSpeechFrames++;
+
+        // Only confirm speech after sustained energy (rejects single-frame mouse clicks / coughs)
+        if (this.consecutiveSpeechFrames >= this.requiredSpeechFrames) {
+          if (!this.isSpeechDetected) {
+            this.isSpeechDetected = true;
+            this.micOrb.classList.add("active");
+            this.updateStateText("Listening — I can hear you, keep speaking.");
+          }
+          this.audioChunks.push(new Float32Array(input));
+
+          // Clear silence timeout while actively speaking
+          if (this.vadSilenceTimer) {
+            clearTimeout(this.vadSilenceTimer);
+            this.vadSilenceTimer = null;
+          }
+
+          // Safety auto-commit if speaking continuously for > 8.0s
+          const currentLen = this.audioChunks.reduce(
+            (acc, c) => acc + c.length,
+            0,
+          );
+          const actualRate =
+            (this.audioContext && this.audioContext.sampleRate) || 16000;
+          if (currentLen > actualRate * 8.0) {
+            this.commitAutoVadSpeech();
+          }
+        }
+      } else {
+        // Below speech threshold
+        this.consecutiveSpeechFrames = 0;
+
+        if (this.isSpeechDetected) {
+          // Still buffer during natural speech pauses
+          this.audioChunks.push(new Float32Array(input));
+
+          if (!this.vadSilenceTimer) {
+            this.vadSilenceTimer = setTimeout(() => {
+              this.commitAutoVadSpeech();
+            }, this.vadSilenceDuration);
+          }
+        }
+      }
+    };
+
+    if (this.workletSupported) {
+      try {
+        this.processorNode = new AudioWorkletNode(
+          this.audioContext,
+          "voice-agent-audio-processor",
+        );
+        this.processorNode.port.onmessage = (e) => {
+          if (e.data && e.data.event === "audio_data") {
+            handleAudioFrame(e.data.buffer, e.data.rms);
+          }
+        };
+        this.audioInputNode.connect(this.processorNode);
+        return;
+      } catch (err) {
+        console.warn("AudioWorkletNode instantiation failed, using fallback:", err);
+      }
+    }
+
+    // Fallback ScriptProcessor
+    const bufferSize = 4096;
+    this.processorNode = this.audioContext.createScriptProcessor(
+      bufferSize,
+      1,
+      1,
+    );
+    window.__vadProcessor = this.processorNode;
+    this.processorNode.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
       const output = e.outputBuffer.getChannelData(0);
-      output.fill(0); // Zero output to prevent mic feedback through speakers
-
-      // Calculate RMS energy
+      output.fill(0);
       let sum = 0;
       for (let i = 0; i < input.length; i++) {
         sum += input[i] * input[i];
       }
       const rms = Math.sqrt(sum / input.length);
-
-      // --- BARGE-IN: If customer speaks while agent is speaking, stop agent immediately ---
-      if (this.isPlayingAudio) {
-        if (rms > this.vadThreshold * 1.3) {
-          console.log(
-            "🛑 Caller interrupted while agent was speaking. Stopping agent playback.",
-          );
-          this.interruptAgent();
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ event: "interrupt" }));
-          }
-          this.isSpeechDetected = true;
-          this.micOrb.classList.add("active");
-          this.updateStateText(
-            "Listening — I stopped speaking, please go ahead.",
-          );
-          this.audioChunks = [new Float32Array(input)];
-          if (this.vadSilenceTimer) {
-            clearTimeout(this.vadSilenceTimer);
-            this.vadSilenceTimer = null;
-          }
-        }
-        return;
-      }
-
-      if (rms > this.vadThreshold) {
-        // Speech detected
-        if (!this.isSpeechDetected) {
-          this.isSpeechDetected = true;
-          this.micOrb.classList.add("active");
-          this.updateStateText("Listening — I can hear you, keep speaking.");
-        }
-        this.audioChunks.push(new Float32Array(input));
-
-        // Clear silence timeout
-        if (this.vadSilenceTimer) {
-          clearTimeout(this.vadSilenceTimer);
-          this.vadSilenceTimer = null;
-        }
-
-        // Safety auto-commit if speaking continuously for > 8.0s
-        const currentLen = this.audioChunks.reduce(
-          (acc, c) => acc + c.length,
-          0,
-        );
-        const actualRate =
-          (this.audioContext && this.audioContext.sampleRate) || 16000;
-        if (currentLen > actualRate * 8.0) {
-          this.commitAutoVadSpeech();
-        }
-      } else if (this.isSpeechDetected) {
-        // Still buffer during natural speech pauses
-        this.audioChunks.push(new Float32Array(input));
-
-        if (!this.vadSilenceTimer) {
-          // Exactly 2 seconds of silence before agent starts answering
-          this.vadSilenceTimer = setTimeout(() => {
-            this.commitAutoVadSpeech();
-          }, this.vadSilenceDuration);
-        }
-      }
+      handleAudioFrame(input, rms);
     };
 
     this.audioInputNode.connect(this.processorNode);
@@ -789,8 +882,10 @@ class VoiceAgentApp {
 
   commitAutoVadSpeech() {
     this.isSpeechDetected = false;
+    this.consecutiveSpeechFrames = 0;
+    this.consecutiveBargeInFrames = 0;
     this.micOrb.classList.remove("active");
-    this.updateStateText("Writing down what you said…");
+    this.updateStateText("Processing what you said…");
 
     const totalLength = this.audioChunks.reduce(
       (acc, chunk) => acc + chunk.length,
@@ -798,7 +893,7 @@ class VoiceAgentApp {
     );
     const actualSampleRate =
       (this.audioContext && this.audioContext.sampleRate) || 16000;
-    const minSamples = Math.round(actualSampleRate * 0.5);
+    const minSamples = Math.round(actualSampleRate * 0.45);
     if (totalLength < minSamples) {
       this.audioChunks = [];
       this.updateStateText("Listening. Speak whenever you are ready.");
@@ -807,11 +902,23 @@ class VoiceAgentApp {
 
     const mergedBuffer = new Float32Array(totalLength);
     let offset = 0;
+    let sumSquares = 0;
     for (const chunk of this.audioChunks) {
       mergedBuffer.set(chunk, offset);
+      for (let i = 0; i < chunk.length; i++) {
+        sumSquares += chunk[i] * chunk[i];
+      }
       offset += chunk.length;
     }
     this.audioChunks = [];
+
+    // Verify overall RMS of recorded audio. If below speech threshold, discard as ambient noise
+    const overallRms = Math.sqrt(sumSquares / totalLength);
+    if (overallRms < this.minSpeechThreshold * 0.70) {
+      console.log(`🔇 Discarded ambient noise buffer (RMS: ${overallRms.toFixed(4)})`);
+      this.updateStateText("Listening. Speak whenever you are ready.");
+      return;
+    }
 
     // Cleanly resample to 16000Hz expected by Sarvam STT
     const resampled = this.resampleTo16k(mergedBuffer, actualSampleRate);
@@ -900,11 +1007,15 @@ class VoiceAgentApp {
   interruptAgent() {
     this.playbackQueue = [];
     this.isPlayingAudio = false;
-    if (this.currentAudioSource) {
-      try {
-        this.currentAudioSource.stop();
-      } catch (e) {}
-      this.currentAudioSource = null;
+    this.nextAudioStartTime = 0;
+    if (this.activeAudioSources && this.activeAudioSources.length > 0) {
+      for (const src of this.activeAudioSources) {
+        try {
+          src.stop();
+          src.disconnect();
+        } catch (e) {}
+      }
+      this.activeAudioSources = [];
     }
     this.micOrb.classList.remove("agent-speaking");
     this.interruptBtn.style.display = "none";
@@ -966,53 +1077,68 @@ class VoiceAgentApp {
   }
 
   // =========================================================================
-  // Audio Playback Queue
+  // Audio Playback Queue with Gapless Scheduling
   // =========================================================================
 
   enqueueAudioChunk(arrayBuffer) {
     this.playbackQueue.push(arrayBuffer);
-    if (!this.isPlayingAudio) {
-      this.playNextAudioChunk();
-    }
+    this.scheduleNextAudioChunks();
   }
 
-  async playNextAudioChunk() {
-    if (this.playbackQueue.length === 0) {
-      this.isPlayingAudio = false;
-      this.micOrb.classList.remove("agent-speaking");
-      this.interruptBtn.style.display = "none";
-      return;
-    }
+  async scheduleNextAudioChunks() {
+    if (this.playbackQueue.length === 0) return;
 
+    if (!this.isPlayingAudio) {
+      this.playbackStartTime = Date.now();
+    }
     this.isPlayingAudio = true;
     this.micOrb.classList.add("agent-speaking");
     this.interruptBtn.style.display = "inline-flex";
 
-    const chunk = this.playbackQueue.shift();
-    try {
-      if (!this.audioContext) {
-        this.audioContext = new (
-          window.AudioContext || window.webkitAudioContext
-        )();
-      }
-      if (this.audioContext.state === "suspended") {
-        await this.audioContext.resume();
-      }
-      const audioBuffer = await this.audioContext.decodeAudioData(
-        chunk.slice(0),
-      );
-      this.currentAudioSource = this.audioContext.createBufferSource();
-      this.currentAudioSource.buffer = audioBuffer;
-      this.currentAudioSource.connect(this.audioContext.destination);
+    if (!this.audioContext) {
+      this.audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
+    }
+    if (this.audioContext.state === "suspended") {
+      await this.audioContext.resume();
+    }
 
-      this.currentAudioSource.onended = () => {
-        this.currentAudioSource = null;
-        this.playNextAudioChunk();
-      };
-      this.currentAudioSource.start();
-    } catch (e) {
-      console.error("Playback decode error:", e);
-      this.playNextAudioChunk();
+    while (this.playbackQueue.length > 0) {
+      const chunk = this.playbackQueue.shift();
+      try {
+        const audioBuffer = await this.audioContext.decodeAudioData(
+          chunk.slice(0),
+        );
+        const source = this.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.audioContext.destination);
+
+        // Gapless seamless scheduling: align start time with exact end of prior buffer
+        const now = this.audioContext.currentTime;
+        const startTime = Math.max(now + 0.01, this.nextAudioStartTime);
+        source.start(startTime);
+        this.nextAudioStartTime = startTime + audioBuffer.duration;
+
+        this.activeAudioSources.push(source);
+
+        source.onended = () => {
+          this.activeAudioSources = this.activeAudioSources.filter(
+            (s) => s !== source,
+          );
+          if (
+            this.activeAudioSources.length === 0 &&
+            this.playbackQueue.length === 0
+          ) {
+            this.isPlayingAudio = false;
+            this.nextAudioStartTime = 0;
+            this.micOrb.classList.remove("agent-speaking");
+            this.interruptBtn.style.display = "none";
+          }
+        };
+      } catch (e) {
+        console.error("Playback decode error:", e);
+      }
     }
   }
 

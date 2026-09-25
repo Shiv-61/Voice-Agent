@@ -36,9 +36,10 @@ class RAGStore:
         self._auto_seed_sample_pdf()
 
     def _auto_seed_sample_pdf(self):
-        """Auto-seeds default university policy document on initial launch if collection is empty."""
+        """Auto-seeds default university policy document if missing from vector store."""
         try:
-            if self.collection.count() == 0:
+            indexed_names = [d.get("filename") for d in self.list_documents()]
+            if "sample_university_policy.pdf" not in indexed_names:
                 sample_pdf = os.path.join(
                     os.path.dirname(os.path.dirname(__file__)),
                     "sample_university_policy.pdf",
@@ -168,7 +169,7 @@ class RAGStore:
                 formatted_results.append({
                     "text": doc,
                     "metadata": meta,
-                    "similarity_score": round(max(0.0, 1.0 - (dist if dist is not None else 0.0)), 3),
+                    "similarity_score": round(max(0.0, 1.0 - ((dist if dist is not None else 0.0) / 2.0)), 3),
                 })
 
         return formatted_results

@@ -17,6 +17,29 @@ except ImportError:
     PSYCOPG2_AVAILABLE = False
 
 
+INDIC_NAME_MAP = {
+    # Gujarati
+    "આરવ": "Aarav", "પટેલ": "Patel",
+    "રાજ": "Raj", "મહેતા": "Mehta",
+    "રિયા": "Riya", "શર્મા": "Sharma",
+    "દેવ": "Dev", "શાહ": "Shah",
+    "પ્રિયા": "Priya",
+    # Hindi
+    "आरव": "Aarav", "पटेल": "Patel",
+    "राज": "Raj", "मेहता": "Mehta",
+    "रिया": "Riya", "शर्मा": "Sharma",
+    "देव": "Dev", "शाह": "Shah",
+    "प्रिया": "Priya",
+}
+
+
+def transliterate_student_name(identifier: str) -> str:
+    """Translates common Hindi and Gujarati student names to Latin script."""
+    tokens = identifier.strip().split()
+    translated = [INDIC_NAME_MAP.get(t, t) for t in tokens]
+    return " ".join(translated)
+
+
 class Database:
     def __init__(self):
         self.use_sqlite = False
@@ -79,6 +102,23 @@ class Database:
             if seed_part and student_count == 0:
                 cursor.executescript(seed_part)
             self.conn.commit()
+            self._migrate_call_logs_columns()
+
+    def _migrate_call_logs_columns(self):
+        """Ensures modern college CRM columns exist in call_logs."""
+        new_cols = [
+            ("intent", "VARCHAR(100)"),
+            ("lead_status", "VARCHAR(50)"),
+            ("sentiment", "VARCHAR(20)"),
+            ("summary", "TEXT"),
+        ]
+        cursor = self.conn.cursor()
+        for col, col_type in new_cols:
+            try:
+                cursor.execute(f"ALTER TABLE call_logs ADD COLUMN {col} {col_type}")
+                self.conn.commit()
+            except Exception:
+                pass
 
     def _execute_query(self, query: str, params: tuple = ()) -> list[dict]:
         """Execute query and return list of dictionaries."""
@@ -95,29 +135,29 @@ class Database:
                 return [dict(row) for row in rows]
         except Exception as err:
             print(f"[db] Query error: {err}")
-            return []
-
     # ------------------------------------------------------------------
     # Domain Queries (Tools for Agent)
     # ------------------------------------------------------------------
 
     def lookup_student(self, identifier: str) -> dict | None:
-        """Lookup student by ID or Name."""
+        """Lookup student by ID or Name (supports English, Hindi, and Gujarati scripts)."""
+        clean_id = transliterate_student_name(identifier)
         query = """
             SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
             FROM students s
             JOIN departments d ON s.department_id = d.department_id
-            WHERE LOWER(s.student_id) = LOWER(?) OR LOWER(s.name) LIKE LOWER(?)
+            WHERE LOWER(s.student_id) = LOWER(?) OR LOWER(s.name) LIKE LOWER(?) OR LOWER(s.name) LIKE LOWER(?)
             LIMIT 1
         """ if self.use_sqlite else """
             SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
             FROM students s
             JOIN departments d ON s.department_id = d.department_id
-            WHERE LOWER(s.student_id) = LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s)
+            WHERE LOWER(s.student_id) = LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s)
             LIMIT 1
         """
-        pattern = f"%{identifier}%"
-        results = self._execute_query(query, (identifier, pattern))
+        pattern_orig = f"%{identifier}%"
+        pattern_clean = f"%{clean_id}%"
+        results = self._execute_query(query, (clean_id, pattern_clean, pattern_orig))
         return results[0] if results else None
 
     def get_student_marks(self, student_id: str) -> list[dict]:
@@ -357,10 +397,27 @@ class Database:
         except Exception as e:
             print(f"[db] close_stale_calls notice: {e}")
 
+    def update_call_analytics(self, call_id: str, intent: str, lead_status: str, sentiment: str, summary: str) -> bool:
+        """Updates call log entry with AI-extracted CRM disposition."""
+        if not call_id:
+            return False
+        ph = "?" if self.use_sqlite else "%s"
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"UPDATE call_logs SET intent = {ph}, lead_status = {ph}, sentiment = {ph}, summary = {ph} WHERE call_id = {ph}",
+                (intent, lead_status, sentiment, summary, call_id),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] update_call_analytics error: {e}")
+            return False
+
     def get_call_history(self, limit: int = 50) -> list[dict]:
         """Returns call log entries, most recent calls first."""
         ph = "?" if self.use_sqlite else "%s"
         return self._execute_query(
-            f"SELECT call_id, caller_number, language, started_at, ended_at, duration_seconds, queries_json, status FROM call_logs ORDER BY started_at DESC LIMIT {ph}",
+            f"SELECT call_id, caller_number, language, started_at, ended_at, duration_seconds, queries_json, status, intent, lead_status, sentiment, summary FROM call_logs ORDER BY started_at DESC LIMIT {ph}",
             (limit,),
         )

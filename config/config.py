@@ -43,12 +43,16 @@ SUPPORTED_LANGUAGES = {
 DEFAULT_LANGUAGE = "en"               # fallback language code
 
 # ---- LLM Configuration ----
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").lower()  # openrouter | ollama
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "sarvam").lower()  # sarvam | openrouter | groq | ollama
+SARVAM_CHAT_URL = os.getenv("SARVAM_CHAT_URL", "https://api.sarvam.ai/v1/chat/completions")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
+
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
-LLM_MODEL = os.getenv("LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")
+LLM_MODEL = os.getenv("LLM_MODEL", "sarvam-105b-conversations")
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "350"))                # more room for tool-call reasoning
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))               # lower for factual accuracy
 
