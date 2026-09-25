@@ -22,15 +22,7 @@ from stt import STT
 from llm.llm import LLM, WELCOME_MESSAGE
 from tts import TTS
 
-SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
-
-
-def split_ready_sentences(buffer: str):
-    parts = SENTENCE_END.split(buffer)
-    if len(parts) <= 1:
-        return [], buffer
-    *complete, remainder = parts
-    return complete, remainder
+from utils import split_ready_sentences
 
 
 def run_cli_mode():

@@ -26,15 +26,7 @@ from rag import RAGStore
 from stt import STT
 from tts import TTS
 
-SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
-
-
-def split_ready_sentences(buffer: str):
-    parts = SENTENCE_END.split(buffer)
-    if len(parts) <= 1:
-        return [], buffer
-    *complete, remainder = parts
-    return complete, remainder
+from utils import split_ready_sentences, is_hangup_intent, clean_speech_text
 
 
 # Initialize application
@@ -362,18 +354,18 @@ class WebVoiceSession:
 
         self.language_code = detected_lang
 
-        # Check call hangup intent via LLM Call Hangup Prompt
-        is_hangup = self.llm.check_call_hangup(user_text)
-
         # 1. Send Thinking Event
         await self.ws.send_json({"event": "agent_thinking"})
 
-        # 2. Query LLM & Stream TTS Chunks
+        # Check call hangup intent via zero-latency evaluator
+        is_hangup = is_hangup_intent(user_text)
+
+        # 2. Query LLM & Stream TTS Chunks Asynchronously
         buffer = ""
         full_agent_reply = ""
 
         try:
-            for piece in self.llm.reply_stream(user_text):
+            async for piece in self.llm.areply_stream(user_text):
                 buffer += piece
                 full_agent_reply += piece
                 ready_sentences, buffer = split_ready_sentences(buffer)
@@ -385,8 +377,8 @@ class WebVoiceSession:
                             "text": sentence.strip(),
                         })
                         try:
-                            audio_chunk = self.tts.synthesize(
-                                sentence.strip(), language_code=detected_lang
+                            audio_chunk = await asyncio.to_thread(
+                                self.tts.synthesize, sentence.strip(), detected_lang
                             )
                             if audio_chunk:
                                 await self.ws.send_bytes(audio_chunk)
@@ -400,8 +392,8 @@ class WebVoiceSession:
                     "text": buffer.strip(),
                 })
                 try:
-                    audio_chunk = self.tts.synthesize(
-                        buffer.strip(), language_code=detected_lang
+                    audio_chunk = await asyncio.to_thread(
+                        self.tts.synthesize, buffer.strip(), detected_lang
                     )
                     if audio_chunk:
                         await self.ws.send_bytes(audio_chunk)
@@ -418,9 +410,8 @@ class WebVoiceSession:
 
             # If hangup condition satisfied, signal call disconnection
             if is_hangup:
-                import asyncio
                 print("📞 [web-ws] Call hangup condition met. Initiating disconnect...")
-                await asyncio.sleep(1.2)  # Allow final farewell speech chunk to play
+                await asyncio.sleep(1.0)  # Allow final farewell speech chunk to play
                 await self.ws.send_json({
                     "event": "call_ended",
                     "call_hangup": True,
@@ -471,8 +462,8 @@ class WebVoiceSession:
             print(f"⚠️ [web-ws] Audio normalization notice: {e}")
 
         try:
-            transcript, detected_lang = self.stt.transcribe(
-                audio_bytes, language_code=self.language_code
+            transcript, detected_lang = await asyncio.to_thread(
+                self.stt.transcribe, audio_bytes, self.language_code
             )
 
         except Exception as e:
@@ -654,7 +645,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
             return
         try:
             is_playing_audio = True
-            wav_bytes = tts.synthesize(text.strip(), language_code=lang)
+            wav_bytes = await asyncio.to_thread(tts.synthesize, text.strip(), lang)
             if not wav_bytes:
                 return
             # Strip 44-byte WAV header to extract raw Linear16 PCM
@@ -689,15 +680,15 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
         wav_payload = out_bio.getvalue()
 
         try:
-            transcript, detected_lang = stt.transcribe(wav_payload)
+            transcript, detected_lang = await asyncio.to_thread(stt.transcribe, wav_payload)
             if not transcript.strip():
                 return
 
             print(f"🎙️ [vobiz-ws] Caller [{detected_lang}]: {transcript}")
-            is_hangup = llm.check_call_hangup(transcript)
+            is_hangup = is_hangup_intent(transcript)
 
             buffer = ""
-            for piece in llm.reply_stream(transcript):
+            async for piece in llm.areply_stream(transcript):
                 buffer += piece
                 ready_sentences, buffer = split_ready_sentences(buffer)
                 for sentence in ready_sentences:
@@ -709,7 +700,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
             if is_hangup:
                 print("📞 [vobiz-ws] Caller hangup detected ({call_hangup: true}). Hanging up call.")
-                await asyncio.sleep(1.2)
+                await asyncio.sleep(1.0)
                 await websocket.send_text(json.dumps({
                     "event": "stop",
                     "streamId": stream_id,
@@ -768,9 +759,9 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     last_speech_time = asyncio.get_event_loop().time()
                 elif is_speech_active:
                     audio_chunks.append(chunk_bytes)
-                    # Check 2.0s silence commit
+                    # Check 0.5s silence commit (reduced from 2.0s for sub-second turnaround)
                     now = asyncio.get_event_loop().time()
-                    if now - last_speech_time >= 2.0:
+                    if now - last_speech_time >= 0.5:
                         is_speech_active = False
                         total_pcm = b"".join(audio_chunks)
                         audio_chunks = []

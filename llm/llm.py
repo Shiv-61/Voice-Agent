@@ -6,12 +6,13 @@ for structured SQL database and unstructured RAG knowledge base.
 
 import json
 import re
-from typing import Generator
-import requests
+from typing import Generator, AsyncGenerator
+import httpx
 
 import config
 from db.database import Database
 from rag import RAGStore
+from utils import is_hangup_intent, clean_speech_text
 
 WELCOME_MESSAGE = "Hello, yah ek AI call hai krupiya apni bhasha select kare english/hindi/gujarati"
 
@@ -170,86 +171,72 @@ class LLM:
 
     def check_call_hangup(self, user_text: str) -> bool:
         """
-        Executes the CALL_HANGUP_PROMPT to evaluate whether caller intends to end the call.
-        Returns True if the call must end, False if it must continue.
+        Fast zero-latency evaluation of whether caller intends to end the call.
+        Replaces slow blocking LLM round-trips with instant multi-lingual intent matching.
         """
-        clean_text = user_text.strip().lower()
-        if not clean_text:
-            return False
+        return is_hangup_intent(user_text)
 
-        # Fast-track obvious hangup words for instant response
-        fast_hangup = {
-            "bye", "goodbye", "bye bye", "bye-bye", "good bye",
-            "hang up", "hangup", "disconnect", "cut the call", "end call",
-            "अलविदा", "આવજો"
-        }
-        if clean_text in fast_hangup:
-            print(f"[llm-hangup] Fast-path hangup matched for: '{user_text}' -> call_hangup: True")
-            return True
+    def _get_provider_request(self, messages: list[dict]):
+        """Builds URL, headers, and payload for streaming LLM calls."""
+        if config.LLM_PROVIDER == "openrouter":
+            headers = {
+                "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": config.LLM_MODEL,
+                "messages": messages,
+                "temperature": config.LLM_TEMPERATURE,
+                "max_tokens": config.LLM_MAX_TOKENS,
+                "stream": True,
+            }
+            return config.OPENROUTER_URL, headers, payload
+        else:
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "model": config.LLM_MODEL,
+                "messages": messages,
+                "stream": True,
+                "options": {
+                    "temperature": config.LLM_TEMPERATURE,
+                    "num_predict": config.LLM_MAX_TOKENS,
+                },
+            }
+            return config.OLLAMA_URL, headers, payload
 
-        recent_context = ""
-        if self.history:
-            recent_context = f"Previous turn: Assistant said: \"{self.history[-1]['content']}\"\n"
-
-        prompt_payload = f"{recent_context}Caller said: \"{user_text}\"\nDetermine whether call_hangup is true or false."
-
-        messages = [
-            {"role": "system", "content": CALL_HANGUP_PROMPT},
-            {"role": "user", "content": prompt_payload},
-        ]
-
-        try:
-            if config.LLM_PROVIDER == "openrouter":
-                headers = {
-                    "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": config.LLM_MODEL,
-                    "messages": messages,
-                    "temperature": 0.0,
-                    "max_tokens": 200,
-                }
-                resp = requests.post(config.OPENROUTER_URL, headers=headers, json=payload, timeout=8)
-                resp.raise_for_status()
-                raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-            else:
-                payload = {
-                    "model": config.LLM_MODEL,
-                    "messages": messages,
-                    "stream": False,
-                    "options": {"temperature": 0.0, "num_predict": 200},
-                }
-                resp = requests.post(config.OLLAMA_URL, json=payload, timeout=8)
-                resp.raise_for_status()
-                raw = resp.json().get("message", {}).get("content", "")
-
-            # Parse JSON
-            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-            match = re.search(r"\{.*?\}", raw, re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
-                val = bool(parsed.get("call_hangup", False))
-                print(f"[llm-hangup] Call hangup JSON evaluated: {parsed} -> {val}")
-                return val
-        except Exception as e:
-            print(f"[llm-hangup] Notice during hangup evaluation: {e}")
-
-        return False
+    def _parse_stream_line(self, line: str) -> str:
+        """Extracts delta token text from SSE or JSON line."""
+        line = line.strip()
+        if not line:
+            return ""
+        if config.LLM_PROVIDER == "openrouter":
+            if line.startswith("data:"):
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    return ""
+                try:
+                    data = json.loads(data_str)
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("delta", {}).get("content", "") or ""
+                except Exception:
+                    return ""
+        else:
+            try:
+                data = json.loads(line)
+                return data.get("message", {}).get("content", "") or ""
+            except Exception:
+                return ""
+        return ""
 
     def reply_stream(self, user_text: str) -> Generator[str, None, None]:
         """
-        Yields response text incrementally. Handles multi-turn tool execution transparently.
-        Appends conversation history to each LLM prompt to maintain context.
+        Synchronously yields response tokens incrementally in real time.
+        Used by CLI and synchronous callers.
         """
         clean_user_text = transform_query(user_text)
-
-        # Appending previous chats to the prompt so context is never forgotten
         history_context = self._format_conversation_history()
-        if history_context:
-            prompt_with_history = f"{history_context}\nCaller's Current Question: {clean_user_text}"
-        else:
-            prompt_with_history = clean_user_text
+        prompt_with_history = f"{history_context}\nCaller's Current Question: {clean_user_text}" if history_context else clean_user_text
 
         self.history.append({"role": "user", "content": clean_user_text})
         self._trim_history()
@@ -263,62 +250,78 @@ class LLM:
         current_iteration = 0
 
         try:
-            while current_iteration < max_tool_iterations:
-                current_iteration += 1
+            with httpx.Client(timeout=35.0) as client:
+                while current_iteration < max_tool_iterations:
+                    current_iteration += 1
+                    url, headers, payload = self._get_provider_request(messages)
 
-                if config.LLM_PROVIDER == "openrouter":
-                    headers = {
-                        "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
-                        "Content-Type": "application/json",
-                    }
-                    payload = {
-                        "model": config.LLM_MODEL,
-                        "messages": messages,
-                        "temperature": config.LLM_TEMPERATURE,
-                        "max_tokens": config.LLM_MAX_TOKENS,
-                    }
-                    resp = requests.post(config.OPENROUTER_URL, headers=headers, json=payload, timeout=35)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    choices = data.get("choices", [])
-                    reply_content = choices[0].get("message", {}).get("content", "") if choices else ""
-                else:
-                    payload = {
-                        "model": config.LLM_MODEL,
-                        "messages": messages,
-                        "stream": False,
-                        "options": {
-                            "temperature": config.LLM_TEMPERATURE,
-                            "num_predict": config.LLM_MAX_TOKENS,
-                        },
-                    }
-                    resp = requests.post(config.OLLAMA_URL, json=payload, timeout=35)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    reply_content = data.get("message", {}).get("content", "")
+                    stream_buffer = ""
+                    is_tool_call = False
+                    is_streaming_speech = False
+                    full_reply = ""
+                    in_think = False
 
-                # Clean thinking/reasoning XML tags if generated by reasoning models
-                reply_content = re.sub(r"<think>.*?</think>", "", reply_content, flags=re.DOTALL).strip()
+                    with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        resp.raise_for_status()
+                        for line in resp.iter_lines():
+                            token = self._parse_stream_line(line)
+                            if not token:
+                                continue
 
-                tool_info = self._parse_tool_call(reply_content)
-                if tool_info:
-                    tool_name, kwargs = tool_info
-                    tool_result = self._execute_tool(tool_name, kwargs)
+                            # Filter thinking reasoning tokens (<think>...</think>)
+                            if "<think>" in token:
+                                in_think = True
+                            if in_think:
+                                if "</think>" in token:
+                                    in_think = False
+                                continue
 
-                    messages.append({"role": "assistant", "content": reply_content})
-                    messages.append({
-                        "role": "user",
-                        "content": f"TOOL_RESULT ({tool_name}): {tool_result}\nPlease synthesize a short, polite spoken answer for the caller in 2-3 sentences.",
-                    })
-                    continue
-                else:
-                    # Final text response without tools
-                    clean_reply = re.sub(r'[*_#`~]', '', reply_content).strip()
-                    self.history.append({"role": "assistant", "content": clean_reply})
-                    yield clean_reply
-                    return
+                            # Detect whether model is issuing a tool call
+                            if not is_streaming_speech and not is_tool_call:
+                                stream_buffer += token
+                                if "TOOL_CALL:" in stream_buffer:
+                                    is_tool_call = True
+                                elif len(stream_buffer) >= 15 or "\n" in stream_buffer:
+                                    is_streaming_speech = True
+                                    yield stream_buffer
+                                    full_reply += stream_buffer
+                                    stream_buffer = ""
+                                continue
 
-            # Fallback if tool iterations exceeded
+                            if is_tool_call:
+                                stream_buffer += token
+                            else:
+                                full_reply += token
+                                yield token
+
+                    # If remaining buffer wasn't flushed for short responses
+                    if stream_buffer and not is_tool_call:
+                        full_reply += stream_buffer
+                        yield stream_buffer
+                        stream_buffer = ""
+
+                    if is_tool_call:
+                        tool_info = self._parse_tool_call(stream_buffer)
+                        if tool_info:
+                            tool_name, kwargs = tool_info
+                            tool_result = self._execute_tool(tool_name, kwargs)
+                            messages.append({"role": "assistant", "content": stream_buffer})
+                            messages.append({
+                                "role": "user",
+                                "content": f"TOOL_RESULT ({tool_name}): {tool_result}\nPlease synthesize a short, polite spoken answer for the caller in 2-3 sentences.",
+                            })
+                            continue
+                        else:
+                            # Tool parse failed, yield buffer as text
+                            clean_text = clean_speech_text(stream_buffer)
+                            self.history.append({"role": "assistant", "content": clean_text})
+                            yield clean_text
+                            return
+                    else:
+                        clean_text = clean_speech_text(full_reply)
+                        self.history.append({"role": "assistant", "content": clean_text})
+                        return
+
             fallback = "I have fetched the information. How else may I assist you with university admissions?"
             self.history.append({"role": "assistant", "content": fallback})
             yield fallback
@@ -326,5 +329,109 @@ class LLM:
         except Exception as err:
             print(f"[llm] Error communicating with {config.LLM_PROVIDER}: {err}")
             fallback_msg = "I am sorry, I am having trouble accessing the university system at this moment. Please try again shortly."
-            yield fallback_msg
             self.history.append({"role": "assistant", "content": fallback_msg})
+            yield fallback_msg
+
+    async def areply_stream(self, user_text: str) -> AsyncGenerator[str, None]:
+        """
+        Asynchronously yields response tokens incrementally in real time.
+        Zero event-loop blocking for FastAPI and WebSocket servers.
+        """
+        clean_user_text = transform_query(user_text)
+        history_context = self._format_conversation_history()
+        prompt_with_history = f"{history_context}\nCaller's Current Question: {clean_user_text}" if history_context else clean_user_text
+
+        self.history.append({"role": "user", "content": clean_user_text})
+        self._trim_history()
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_with_history},
+        ]
+
+        max_tool_iterations = 3
+        current_iteration = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=35.0) as client:
+                while current_iteration < max_tool_iterations:
+                    current_iteration += 1
+                    url, headers, payload = self._get_provider_request(messages)
+
+                    stream_buffer = ""
+                    is_tool_call = False
+                    is_streaming_speech = False
+                    full_reply = ""
+                    in_think = False
+
+                    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            token = self._parse_stream_line(line)
+                            if not token:
+                                continue
+
+                            # Filter thinking reasoning tokens (<think>...</think>)
+                            if "<think>" in token:
+                                in_think = True
+                            if in_think:
+                                if "</think>" in token:
+                                    in_think = False
+                                continue
+
+                            # Detect whether model is issuing a tool call
+                            if not is_streaming_speech and not is_tool_call:
+                                stream_buffer += token
+                                if "TOOL_CALL:" in stream_buffer:
+                                    is_tool_call = True
+                                elif len(stream_buffer) >= 15 or "\n" in stream_buffer:
+                                    is_streaming_speech = True
+                                    yield stream_buffer
+                                    full_reply += stream_buffer
+                                    stream_buffer = ""
+                                continue
+
+                            if is_tool_call:
+                                stream_buffer += token
+                            else:
+                                full_reply += token
+                                yield token
+
+                    # If remaining buffer wasn't flushed for short responses
+                    if stream_buffer and not is_tool_call:
+                        full_reply += stream_buffer
+                        yield stream_buffer
+                        stream_buffer = ""
+
+                    if is_tool_call:
+                        tool_info = self._parse_tool_call(stream_buffer)
+                        if tool_info:
+                            tool_name, kwargs = tool_info
+                            # Run tool in worker thread if blocking
+                            import asyncio
+                            tool_result = await asyncio.to_thread(self._execute_tool, tool_name, kwargs)
+                            messages.append({"role": "assistant", "content": stream_buffer})
+                            messages.append({
+                                "role": "user",
+                                "content": f"TOOL_RESULT ({tool_name}): {tool_result}\nPlease synthesize a short, polite spoken answer for the caller in 2-3 sentences.",
+                            })
+                            continue
+                        else:
+                            clean_text = clean_speech_text(stream_buffer)
+                            self.history.append({"role": "assistant", "content": clean_text})
+                            yield clean_text
+                            return
+                    else:
+                        clean_text = clean_speech_text(full_reply)
+                        self.history.append({"role": "assistant", "content": clean_text})
+                        return
+
+            fallback = "I have fetched the information. How else may I assist you with university admissions?"
+            self.history.append({"role": "assistant", "content": fallback})
+            yield fallback
+
+        except Exception as err:
+            print(f"[llm] Async communication error with {config.LLM_PROVIDER}: {err}")
+            fallback_msg = "I am sorry, I am having trouble accessing the university system at this moment. Please try again shortly."
+            self.history.append({"role": "assistant", "content": fallback_msg})
+            yield fallback_msg

@@ -23,14 +23,16 @@ class VoiceAgentApp {
     // Auto-VAD threshold & timer state
     this.vadThreshold = 0.009; // Filters mouse clicks and ambient hum
     this.vadSilenceTimer = null;
-    this.vadSilenceDuration = 2000; // Exactly 2 seconds silence before agent starts answering
+    this.vadSilenceDuration = 450; // Optimized sub-second conversational turn detection (450ms)
     this.isSpeechDetected = false;
     this.callStartupGrace = 0;
 
-    // Audio Playback Queue
+    // Audio Playback Queue with Gapless Scheduling
     this.playbackQueue = [];
     this.isPlayingAudio = false;
-    this.currentAudioSource = null;
+    this.activeAudioSources = [];
+    this.nextAudioStartTime = 0;
+    this.workletSupported = false;
 
     // Canvas animation
     this.canvas = document.getElementById("waveformCanvas");
@@ -656,6 +658,16 @@ class VoiceAgentApp {
     if (this.audioContext.state === "suspended") {
       await this.audioContext.resume();
     }
+    // Attempt to register high-performance AudioWorklet for off-main-thread processing
+    try {
+      if (this.audioContext.audioWorklet) {
+        await this.audioContext.audioWorklet.addModule("/static/audio-processor.js");
+        this.workletSupported = true;
+      }
+    } catch (err) {
+      console.warn("AudioWorklet module notice, fallback processor enabled:", err);
+      this.workletSupported = false;
+    }
     this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -680,34 +692,16 @@ class VoiceAgentApp {
       this.processorNode = null;
     }
 
-    const bufferSize = 4096;
-    this.processorNode = this.audioContext.createScriptProcessor(
-      bufferSize,
-      1,
-      1,
-    );
-    window.__vadProcessor = this.processorNode; // Prevent garbage collection in Firefox
     this.audioChunks = [];
     this.isSpeechDetected = false;
 
-    this.processorNode.onaudioprocess = (e) => {
+    const handleAudioFrame = (input, rms) => {
       if (
         !this.isCallActive ||
         this.callMode !== "auto_vad" ||
         Date.now() < this.callStartupGrace
       )
         return;
-
-      const input = e.inputBuffer.getChannelData(0);
-      const output = e.outputBuffer.getChannelData(0);
-      output.fill(0); // Zero output to prevent mic feedback through speakers
-
-      // Calculate RMS energy
-      let sum = 0;
-      for (let i = 0; i < input.length; i++) {
-        sum += input[i] * input[i];
-      }
-      const rms = Math.sqrt(sum / input.length);
 
       // --- BARGE-IN: If customer speaks while agent is speaking, stop agent immediately ---
       if (this.isPlayingAudio) {
@@ -763,12 +757,49 @@ class VoiceAgentApp {
         this.audioChunks.push(new Float32Array(input));
 
         if (!this.vadSilenceTimer) {
-          // Exactly 2 seconds of silence before agent starts answering
           this.vadSilenceTimer = setTimeout(() => {
             this.commitAutoVadSpeech();
           }, this.vadSilenceDuration);
         }
       }
+    };
+
+    if (this.workletSupported) {
+      try {
+        this.processorNode = new AudioWorkletNode(
+          this.audioContext,
+          "voice-agent-audio-processor",
+        );
+        this.processorNode.port.onmessage = (e) => {
+          if (e.data && e.data.event === "audio_data") {
+            handleAudioFrame(e.data.buffer, e.data.rms);
+          }
+        };
+        this.audioInputNode.connect(this.processorNode);
+        return;
+      } catch (err) {
+        console.warn("AudioWorkletNode instantiation failed, using fallback:", err);
+      }
+    }
+
+    // Fallback ScriptProcessor
+    const bufferSize = 4096;
+    this.processorNode = this.audioContext.createScriptProcessor(
+      bufferSize,
+      1,
+      1,
+    );
+    window.__vadProcessor = this.processorNode;
+    this.processorNode.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const output = e.outputBuffer.getChannelData(0);
+      output.fill(0);
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) {
+        sum += input[i] * input[i];
+      }
+      const rms = Math.sqrt(sum / input.length);
+      handleAudioFrame(input, rms);
     };
 
     this.audioInputNode.connect(this.processorNode);
@@ -798,7 +829,7 @@ class VoiceAgentApp {
     );
     const actualSampleRate =
       (this.audioContext && this.audioContext.sampleRate) || 16000;
-    const minSamples = Math.round(actualSampleRate * 0.5);
+    const minSamples = Math.round(actualSampleRate * 0.25);
     if (totalLength < minSamples) {
       this.audioChunks = [];
       this.updateStateText("Listening. Speak whenever you are ready.");
@@ -900,11 +931,15 @@ class VoiceAgentApp {
   interruptAgent() {
     this.playbackQueue = [];
     this.isPlayingAudio = false;
-    if (this.currentAudioSource) {
-      try {
-        this.currentAudioSource.stop();
-      } catch (e) {}
-      this.currentAudioSource = null;
+    this.nextAudioStartTime = 0;
+    if (this.activeAudioSources && this.activeAudioSources.length > 0) {
+      for (const src of this.activeAudioSources) {
+        try {
+          src.stop();
+          src.disconnect();
+        } catch (e) {}
+      }
+      this.activeAudioSources = [];
     }
     this.micOrb.classList.remove("agent-speaking");
     this.interruptBtn.style.display = "none";
@@ -966,53 +1001,65 @@ class VoiceAgentApp {
   }
 
   // =========================================================================
-  // Audio Playback Queue
+  // Audio Playback Queue with Gapless Scheduling
   // =========================================================================
 
   enqueueAudioChunk(arrayBuffer) {
     this.playbackQueue.push(arrayBuffer);
-    if (!this.isPlayingAudio) {
-      this.playNextAudioChunk();
-    }
+    this.scheduleNextAudioChunks();
   }
 
-  async playNextAudioChunk() {
-    if (this.playbackQueue.length === 0) {
-      this.isPlayingAudio = false;
-      this.micOrb.classList.remove("agent-speaking");
-      this.interruptBtn.style.display = "none";
-      return;
-    }
+  async scheduleNextAudioChunks() {
+    if (this.playbackQueue.length === 0) return;
 
     this.isPlayingAudio = true;
     this.micOrb.classList.add("agent-speaking");
     this.interruptBtn.style.display = "inline-flex";
 
-    const chunk = this.playbackQueue.shift();
-    try {
-      if (!this.audioContext) {
-        this.audioContext = new (
-          window.AudioContext || window.webkitAudioContext
-        )();
-      }
-      if (this.audioContext.state === "suspended") {
-        await this.audioContext.resume();
-      }
-      const audioBuffer = await this.audioContext.decodeAudioData(
-        chunk.slice(0),
-      );
-      this.currentAudioSource = this.audioContext.createBufferSource();
-      this.currentAudioSource.buffer = audioBuffer;
-      this.currentAudioSource.connect(this.audioContext.destination);
+    if (!this.audioContext) {
+      this.audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
+    }
+    if (this.audioContext.state === "suspended") {
+      await this.audioContext.resume();
+    }
 
-      this.currentAudioSource.onended = () => {
-        this.currentAudioSource = null;
-        this.playNextAudioChunk();
-      };
-      this.currentAudioSource.start();
-    } catch (e) {
-      console.error("Playback decode error:", e);
-      this.playNextAudioChunk();
+    while (this.playbackQueue.length > 0) {
+      const chunk = this.playbackQueue.shift();
+      try {
+        const audioBuffer = await this.audioContext.decodeAudioData(
+          chunk.slice(0),
+        );
+        const source = this.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.audioContext.destination);
+
+        // Gapless seamless scheduling: align start time with exact end of prior buffer
+        const now = this.audioContext.currentTime;
+        const startTime = Math.max(now + 0.01, this.nextAudioStartTime);
+        source.start(startTime);
+        this.nextAudioStartTime = startTime + audioBuffer.duration;
+
+        this.activeAudioSources.push(source);
+
+        source.onended = () => {
+          this.activeAudioSources = this.activeAudioSources.filter(
+            (s) => s !== source,
+          );
+          if (
+            this.activeAudioSources.length === 0 &&
+            this.playbackQueue.length === 0
+          ) {
+            this.isPlayingAudio = false;
+            this.nextAudioStartTime = 0;
+            this.micOrb.classList.remove("agent-speaking");
+            this.interruptBtn.style.display = "none";
+          }
+        };
+      } catch (e) {
+        console.error("Playback decode error:", e);
+      }
     }
   }
 
