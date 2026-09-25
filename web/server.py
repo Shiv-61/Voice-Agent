@@ -77,6 +77,7 @@ async def get_system_status():
     """Checks the health of Ollama LLM, Sarvam AI API, Database, and Vector Store."""
     # 1. LLM status
     llm_status = "unavailable"
+    active_model = config.LLM_MODEL
     if config.LLM_PROVIDER == "sarvam":
         provider_label = "Sarvam AI (Cloud)"
         llm_status = "ready" if config.SARVAM_API_KEY and len(config.SARVAM_API_KEY) > 10 else "missing API key"
