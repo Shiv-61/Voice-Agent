@@ -79,6 +79,23 @@ class Database:
             if seed_part and student_count == 0:
                 cursor.executescript(seed_part)
             self.conn.commit()
+            self._migrate_call_logs_columns()
+
+    def _migrate_call_logs_columns(self):
+        """Ensures modern college CRM columns exist in call_logs."""
+        new_cols = [
+            ("intent", "VARCHAR(100)"),
+            ("lead_status", "VARCHAR(50)"),
+            ("sentiment", "VARCHAR(20)"),
+            ("summary", "TEXT"),
+        ]
+        cursor = self.conn.cursor()
+        for col, col_type in new_cols:
+            try:
+                cursor.execute(f"ALTER TABLE call_logs ADD COLUMN {col} {col_type}")
+                self.conn.commit()
+            except Exception:
+                pass
 
     def _execute_query(self, query: str, params: tuple = ()) -> list[dict]:
         """Execute query and return list of dictionaries."""
@@ -357,10 +374,27 @@ class Database:
         except Exception as e:
             print(f"[db] close_stale_calls notice: {e}")
 
+    def update_call_analytics(self, call_id: str, intent: str, lead_status: str, sentiment: str, summary: str) -> bool:
+        """Updates call log entry with AI-extracted CRM disposition."""
+        if not call_id:
+            return False
+        ph = "?" if self.use_sqlite else "%s"
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"UPDATE call_logs SET intent = {ph}, lead_status = {ph}, sentiment = {ph}, summary = {ph} WHERE call_id = {ph}",
+                (intent, lead_status, sentiment, summary, call_id),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] update_call_analytics error: {e}")
+            return False
+
     def get_call_history(self, limit: int = 50) -> list[dict]:
         """Returns call log entries, most recent calls first."""
         ph = "?" if self.use_sqlite else "%s"
         return self._execute_query(
-            f"SELECT call_id, caller_number, language, started_at, ended_at, duration_seconds, queries_json, status FROM call_logs ORDER BY started_at DESC LIMIT {ph}",
+            f"SELECT call_id, caller_number, language, started_at, ended_at, duration_seconds, queries_json, status, intent, lead_status, sentiment, summary FROM call_logs ORDER BY started_at DESC LIMIT {ph}",
             (limit,),
         )

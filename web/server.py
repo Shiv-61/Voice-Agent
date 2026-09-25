@@ -321,10 +321,16 @@ class WebVoiceSession:
         return self.call_id
 
     def end_call_log(self):
-        """Closes the session's open call log entry, if any."""
+        """Closes the session's open call log entry and runs async post-call CRM extraction."""
         if self.call_id:
-            db.log_call_end(self.call_id)
+            cid = self.call_id
+            db.log_call_end(cid)
             self.call_id = None
+            try:
+                from intelligence.post_call import analyze_and_record_call
+                asyncio.create_task(analyze_and_record_call(cid, self.llm.history.copy(), db))
+            except Exception as e:
+                print(f"[web-ws] Post-call analyzer launch notice: {e}")
 
     def _hook_llm_tools(self):
         """Wraps LLM tool execution to broadcast live tool events to the frontend."""

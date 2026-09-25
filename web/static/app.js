@@ -474,12 +474,25 @@ class VoiceAgentApp {
             ? new Date(c.started_at).toLocaleString()
             : "—";
           const ongoing = !c.ended_at;
+          const intent = c.intent || "Admission & General";
+          const lead = c.lead_status || "Prospective Applicant";
+          const summary = c.summary || purpose;
+          const sentimentIcon = c.sentiment === "Positive" ? "😊" : c.sentiment === "Frustrated" ? "⚠️" : "💬";
+
           return `
           <tr>
             <td><code class="mono">${this.escapeHtml(c.call_id || "")}</code></td>
             <td>${this.escapeHtml(c.caller_number || "Web")}</td>
-            <td>${ongoing ? "Ongoing" : this.formatDuration(c.duration_seconds || 0)}</td>
-            <td class="query-cell" title="${purpose}">${purpose}</td>
+            <td>${ongoing ? '<span class="tag">Ongoing</span>' : this.formatDuration(c.duration_seconds || 0)}</td>
+            <td>
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                <span class="tag" style="font-size:0.75rem;">${sentimentIcon} ${this.escapeHtml(intent)}</span>
+                <span class="muted small">${this.escapeHtml(lead)}</span>
+              </div>
+            </td>
+            <td class="query-cell" title="${this.escapeHtml(summary)}">
+              <span style="font-size:0.85rem; line-height:1.3;">${this.escapeHtml(summary)}</span>
+            </td>
             <td class="muted small">${when}</td>
           </tr>
         `;

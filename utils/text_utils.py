@@ -109,6 +109,9 @@ def clean_speech_text(text: str) -> str:
     # Remove formatting characters (*, _, #, ~, [])
     cleaned = re.sub(r"[*_#~]", "", cleaned)
     cleaned = re.sub(r"\[.*?\]", "", cleaned)
+    # Remove third-person LLM meta-reasoning prefixes (e.g. "The user is asking...", "I should answer...")
+    cleaned = re.sub(r"^(?:The user is (?:asking|inquiring|looking|requesting|wondering)[^.]*\.\s*)+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:I should (?:answer|provide|tell|respond)[^.]*\.\s*)+", "", cleaned, flags=re.IGNORECASE)
     # Normalize excessive whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
