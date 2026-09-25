@@ -41,7 +41,8 @@ VOICE CALL STYLE & CONVERSATIONAL RULES:
 6. SHORT SPOKEN SENTENCES: Speak naturally in 1 to 3 short sentences. Never use markdown formatting (no asterisks, bold, bullet points, numbers, or hashtags) because your answer will be synthesized directly into speech.
 7. EXACT LANGUAGE MATCHING: Always respond in the exact language spoken by the caller (English, Hindi, or Gujarati).
 8. CONTEXT CONTINUITY: Use the conversation history provided with each prompt to understand follow-up questions, pronouns, and references (such as "what about his fees?", "when does it start?").
-9. TOOL CALLING: If you need to look up facts from the official university database or policy files, output:
+9. DIRECT CONTEXT UTILIZATION: If [VERIFIED OFFICIAL UNIVERSITY CONTEXT] is already provided in the prompt, answer directly and immediately using that context in 1 to 2 spoken sentences. Do NOT emit a TOOL_CALL when the information is already in the context.
+10. TOOL CALLING: Only if required facts are NOT already in the prompt context, output:
    TOOL_CALL: tool_name(param="value")
 
    Available Tools:
@@ -52,8 +53,8 @@ VOICE CALL STYLE & CONVERSATIONAL RULES:
    - get_admission_info(program="CSE/ECE/MTech or empty") -> Retrieves eligibility, fee structure, & application deadline.
    - search_university_docs(query="keywords or topic") -> Searches unstructured university prospectus, hostel rules, scholarship guidelines, campus policies, and PDF documents.
 
-10. If a caller asks about student marks or attendance without providing the student's name or ID, politely ask for their name or ID first.
-11. When tool results are provided, synthesize them into a concise spoken answer in 2-3 sentences.
+11. If a caller asks about student marks or attendance without providing the student's name or ID, politely ask for their name or ID first.
+12. When tool results are provided, synthesize them into a concise spoken answer in 2-3 sentences.
 """
 
 CALL_HANGUP_PROMPT = """\
@@ -84,13 +85,99 @@ def transform_query(user_text: str) -> str:
     return cleaned
 
 
+_shared_db = None
+_shared_rag = None
+
+def get_shared_db():
+    global _shared_db
+    if _shared_db is None:
+        _shared_db = Database()
+    return _shared_db
+
+def get_shared_rag():
+    global _shared_rag
+    if _shared_rag is None:
+        _shared_rag = RAGStore()
+    return _shared_rag
+
+
 class LLM:
-    def __init__(self):
-        self.db = Database()
-        self.rag = RAGStore()
+    def __init__(self, db=None, rag=None):
+        self.db = db or get_shared_db()
+        self.rag = rag or get_shared_rag()
         # Initialize conversation history with the assistant's opening welcome message
         self.history: list[dict[str, str]] = [
             {"role": "assistant", "content": WELCOME_MESSAGE}
+        ]
+
+    def _prepare_messages(self, user_text: str) -> list[dict[str, str]]:
+        """
+        Prepares LLM messages with conversation history and anticipatory RAG / DB context.
+        Pre-retrieval eliminates the slow, redundant 2nd turn LLM tool round-trip!
+        """
+        clean_user_text = transform_query(user_text)
+        history_context = self._format_conversation_history()
+
+        context_snippets = []
+
+        # 1. Anticipatory RAG query (PDF brochures, hostel, rules, syllabus, scholarships, etc.)
+        try:
+            matches = self.rag.query_documents(clean_user_text, n_results=2)
+            if matches and matches[0].get("similarity_score", 0) >= 0.25:
+                for m in matches:
+                    text_snippet = m.get("text", "").strip()
+                    if text_snippet:
+                        filename = m.get("metadata", {}).get("filename", "University Document")
+                        context_snippets.append(f"[Policy Doc: {filename}]: {text_snippet[:400]}")
+        except Exception as e:
+            print(f"[llm] Anticipatory RAG notice: {e}")
+
+        # 2. Anticipatory DB check for admission or placement
+        try:
+            lower_text = clean_user_text.lower()
+            if any(k in lower_text for k in ["placement", "package", "recruiter", "salary", "placed"]):
+                stats = self.db.get_placement_stats()
+                if stats:
+                    context_snippets.append(f"[Official Placement Records]: {json.dumps(stats)}")
+            if any(k in lower_text for k in ["admission", "eligibility", "fee", "fees", "apply", "deadline", "course"]):
+                prog = "CSE" if any(p in lower_text for p in ["cse", "computer", "it"]) else "ECE" if "ece" in lower_text else ""
+                adm = self.db.get_admission_info(prog)
+                if adm:
+                    context_snippets.append(f"[Official Admission & Fee Records]: {json.dumps(adm)}")
+            # Student ID pattern (e.g., STU001)
+            stu_match = re.search(r'\b(stu\d{3})\b', lower_text)
+            if stu_match:
+                stu_id = stu_match.group(1).upper()
+                student = self.db.lookup_student(stu_id)
+                if student:
+                    context_snippets.append(f"[Student Record {stu_id}]: {json.dumps(student)}")
+                if any(w in lower_text for w in ["mark", "grade", "score", "result"]):
+                    marks = self.db.get_student_marks(stu_id)
+                    if marks:
+                        context_snippets.append(f"[Student Marks {stu_id}]: {json.dumps(marks)}")
+                if any(w in lower_text for w in ["attendance", "present", "absent"]):
+                    att = self.db.get_student_attendance(stu_id)
+                    if att:
+                        context_snippets.append(f"[Student Attendance {stu_id}]: {json.dumps(att)}")
+        except Exception as e:
+            print(f"[llm] Anticipatory DB notice: {e}")
+
+        rag_context = ""
+        if context_snippets:
+            rag_context = (
+                "\n[VERIFIED OFFICIAL UNIVERSITY CONTEXT (Use this directly to answer in 1-2 spoken sentences; do NOT issue a TOOL_CALL if answer is here)]:\n"
+                + "\n".join(context_snippets)
+                + "\n[END OFFICIAL CONTEXT]\n"
+            )
+
+        prompt_body = f"{history_context}\n{rag_context}Caller's Current Question: {clean_user_text}" if history_context else f"{rag_context}Caller's Question: {clean_user_text}"
+
+        self.history.append({"role": "user", "content": clean_user_text})
+        self._trim_history()
+
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_body},
         ]
 
     def _trim_history(self):
@@ -234,17 +321,7 @@ class LLM:
         Synchronously yields response tokens incrementally in real time.
         Used by CLI and synchronous callers.
         """
-        clean_user_text = transform_query(user_text)
-        history_context = self._format_conversation_history()
-        prompt_with_history = f"{history_context}\nCaller's Current Question: {clean_user_text}" if history_context else clean_user_text
-
-        self.history.append({"role": "user", "content": clean_user_text})
-        self._trim_history()
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt_with_history},
-        ]
+        messages = self._prepare_messages(user_text)
 
         max_tool_iterations = 3
         current_iteration = 0
@@ -346,17 +423,7 @@ class LLM:
         Asynchronously yields response tokens incrementally in real time.
         Zero event-loop blocking for FastAPI and WebSocket servers.
         """
-        clean_user_text = transform_query(user_text)
-        history_context = self._format_conversation_history()
-        prompt_with_history = f"{history_context}\nCaller's Current Question: {clean_user_text}" if history_context else clean_user_text
-
-        self.history.append({"role": "user", "content": clean_user_text})
-        self._trim_history()
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt_with_history},
-        ]
+        messages = self._prepare_messages(user_text)
 
         max_tool_iterations = 3
         current_iteration = 0

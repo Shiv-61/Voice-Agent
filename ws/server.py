@@ -54,26 +54,46 @@ class VoiceCallSession:
         self.language_code = detected_lang
 
         buffer = ""
-        async for piece in self.llm.areply_stream(transcript):
-            buffer += piece
-            ready_sentences, buffer = split_ready_sentences(buffer)
+        sentence_queue = asyncio.Queue()
 
-            for sentence in ready_sentences:
-                if sentence.strip():
-                    audio_chunk = await asyncio.to_thread(
-                        self.tts.synthesize, sentence.strip(), detected_lang
+        async def llm_producer():
+            nonlocal buffer
+            try:
+                async for piece in self.llm.areply_stream(transcript):
+                    buffer += piece
+                    ready_sentences, buffer = split_ready_sentences(buffer)
+
+                    for sentence in ready_sentences:
+                        s = sentence.strip()
+                        if s:
+                            synth_task = asyncio.create_task(
+                                asyncio.to_thread(self.tts.synthesize, s, detected_lang)
+                            )
+                            await sentence_queue.put(synth_task)
+
+                if buffer.strip():
+                    rem = buffer.strip()
+                    synth_task = asyncio.create_task(
+                        asyncio.to_thread(self.tts.synthesize, rem, detected_lang)
                     )
+                    await sentence_queue.put(synth_task)
+            finally:
+                await sentence_queue.put(None)
+
+        async def tts_consumer():
+            while True:
+                task = await sentence_queue.get()
+                if task is None:
+                    break
+                try:
+                    audio_chunk = await task
                     if audio_chunk:
                         await websocket.send(audio_chunk)
                         print(f"🔊 [ws] Streamed audio response chunk ({len(audio_chunk)} bytes)")
+                except Exception as err:
+                    print(f"[ws] Pipelined TTS chunk error: {err}")
 
-        if buffer.strip():
-            audio_chunk = await asyncio.to_thread(
-                self.tts.synthesize, buffer.strip(), detected_lang
-            )
-            if audio_chunk:
-                await websocket.send(audio_chunk)
-                print(f"🔊 [ws] Streamed audio response chunk ({len(audio_chunk)} bytes)")
+        await asyncio.gather(llm_producer(), tts_consumer())
 
 
 async def connection_handler(websocket: ServerConnection):

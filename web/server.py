@@ -301,7 +301,7 @@ class WebVoiceSession:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         self.stt = STT()
-        self.llm = LLM()
+        self.llm = LLM(db=db, rag=rag)
         self.tts = TTS()
         self.language_code = config.DEFAULT_LANGUAGE
         self.active_task = None
@@ -361,45 +361,60 @@ class WebVoiceSession:
         # Check call hangup intent via zero-latency evaluator
         is_hangup = is_hangup_intent(user_text)
 
-        # 2. Query LLM & Stream TTS Chunks Asynchronously
+        # 2. Query LLM & Stream TTS Chunks Concurrently (Pipelined Synthesis)
         buffer = ""
         full_agent_reply = ""
+        sentence_queue = asyncio.Queue()
 
-        try:
-            async for piece in self.llm.areply_stream(user_text):
-                buffer += piece
-                full_agent_reply += piece
-                ready_sentences, buffer = split_ready_sentences(buffer)
+        async def llm_producer():
+            nonlocal buffer, full_agent_reply
+            try:
+                async for piece in self.llm.areply_stream(user_text):
+                    buffer += piece
+                    full_agent_reply += piece
+                    ready_sentences, buffer = split_ready_sentences(buffer)
 
-                for sentence in ready_sentences:
-                    if sentence.strip():
-                        await self.ws.send_json({
-                            "event": "agent_partial_text",
-                            "text": sentence.strip(),
-                        })
-                        try:
-                            audio_chunk = await asyncio.to_thread(
-                                self.tts.synthesize, sentence.strip(), detected_lang
+                    for sentence in ready_sentences:
+                        s = sentence.strip()
+                        if s:
+                            await self.ws.send_json({
+                                "event": "agent_partial_text",
+                                "text": s,
+                            })
+                            # Schedule synthesis in worker threadpool immediately
+                            synth_task = asyncio.create_task(
+                                asyncio.to_thread(self.tts.synthesize, s, detected_lang)
                             )
-                            if audio_chunk:
-                                await self.ws.send_bytes(audio_chunk)
-                        except Exception as err:
-                            print(f"[web-ws] TTS chunk error: {err}")
+                            await sentence_queue.put(synth_task)
 
-            # Process buffer remainder
-            if buffer.strip():
-                await self.ws.send_json({
-                    "event": "agent_partial_text",
-                    "text": buffer.strip(),
-                })
-                try:
-                    audio_chunk = await asyncio.to_thread(
-                        self.tts.synthesize, buffer.strip(), detected_lang
+                # Process buffer remainder
+                if buffer.strip():
+                    rem = buffer.strip()
+                    await self.ws.send_json({
+                        "event": "agent_partial_text",
+                        "text": rem,
+                    })
+                    synth_task = asyncio.create_task(
+                        asyncio.to_thread(self.tts.synthesize, rem, detected_lang)
                     )
+                    await sentence_queue.put(synth_task)
+            finally:
+                await sentence_queue.put(None)  # Sentinel
+
+        async def tts_consumer():
+            while True:
+                task = await sentence_queue.get()
+                if task is None:
+                    break
+                try:
+                    audio_chunk = await task
                     if audio_chunk:
                         await self.ws.send_bytes(audio_chunk)
                 except Exception as err:
-                    print(f"[web-ws] TTS buffer error: {err}")
+                    print(f"[web-ws] Pipelined TTS streaming error: {err}")
+
+        try:
+            await asyncio.gather(llm_producer(), tts_consumer())
 
             # Signal completion with call_hangup flag
             await self.ws.send_json({
