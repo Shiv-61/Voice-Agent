@@ -18,6 +18,7 @@ import config
 from stt import STT
 from llm import LLM
 from tts import TTS
+from utils.filler_manager import FillerManager
 from utils import split_ready_sentences
 
 
@@ -26,6 +27,7 @@ class VoiceCallSession:
         self.stt = STT()
         self.llm = LLM()
         self.tts = TTS()
+        self.filler_mgr = FillerManager(tts=self.tts)
         self.language_code = config.DEFAULT_LANGUAGE
 
     async def handle_audio_stream(self, audio_bytes: bytes, websocket: ServerConnection):
@@ -37,6 +39,16 @@ class VoiceCallSession:
         """
         if not audio_bytes or len(audio_bytes) < 100:
             return
+
+        # Immediate acoustic filler bridge for telephony callers (< 150ms)
+        if len(audio_bytes) >= 16000:
+            filler = self.filler_mgr.get_filler(self.language_code)
+            if filler:
+                try:
+                    await websocket.send(filler)
+                    print(f"⚡ [ws] Sent instant acoustic filler ({self.language_code})")
+                except Exception as fe:
+                    print(f"[ws] Filler notice: {fe}")
 
         try:
             transcript, detected_lang = await asyncio.to_thread(

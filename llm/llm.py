@@ -304,10 +304,26 @@ class LLM:
 
     def _get_provider_request(self, messages: list[dict]):
         """Builds URL, headers, and payload for streaming LLM calls."""
-        if config.LLM_PROVIDER == "openrouter":
+        if config.LLM_PROVIDER == "groq":
+            headers = {
+                "Authorization": f"Bearer {config.GROQ_API_KEY.strip()}",
+                "Content-Type": "application/json",
+            }
+            groq_model = config.LLM_MODEL if config.LLM_MODEL and ("llama" in config.LLM_MODEL.lower() or "mixtral" in config.LLM_MODEL.lower() or "gemma" in config.LLM_MODEL.lower()) else "llama-3.3-70b-versatile"
+            payload = {
+                "model": groq_model,
+                "messages": messages,
+                "temperature": config.LLM_TEMPERATURE,
+                "max_tokens": config.LLM_MAX_TOKENS,
+                "stream": True,
+            }
+            return config.GROQ_URL, headers, payload
+        elif config.LLM_PROVIDER == "openrouter":
             headers = {
                 "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/Shiv-61/Voice-Agent",
+                "X-Title": "College Voice Agent",
             }
             payload = {
                 "model": config.LLM_MODEL,
@@ -335,7 +351,7 @@ class LLM:
         line = line.strip()
         if not line:
             return ""
-        if config.LLM_PROVIDER == "openrouter":
+        if config.LLM_PROVIDER in ("openrouter", "groq"):
             if line.startswith("data:"):
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":

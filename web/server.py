@@ -25,6 +25,7 @@ from llm.llm import LLM, WELCOME_MESSAGE
 from rag import RAGStore
 from stt import STT
 from tts import TTS
+from utils.filler_manager import FillerManager
 
 from utils import split_ready_sentences, is_hangup_intent, clean_speech_text
 
@@ -303,6 +304,7 @@ class WebVoiceSession:
         self.stt = STT()
         self.llm = LLM(db=db, rag=rag)
         self.tts = TTS()
+        self.filler_mgr = FillerManager(tts=self.tts)
         self.language_code = config.DEFAULT_LANGUAGE
         self.active_task = None
         self.call_id = None
@@ -483,6 +485,21 @@ class WebVoiceSession:
         except Exception as e:
             print(f"⚠️ [web-ws] Audio normalization notice: {e}")
 
+        filler_sent = False
+        if audio_dur >= 0.7 and audio_rms >= 0.002:
+            filler_audio = self.filler_mgr.get_filler(self.language_code)
+            if filler_audio:
+                try:
+                    await self.ws.send_json({
+                        "event": "agent_filler",
+                        "language": self.language_code,
+                    })
+                    await self.ws.send_bytes(filler_audio)
+                    filler_sent = True
+                    print(f"⚡ [web-ws] Streamed instant acoustic filler ({self.language_code}) within 150ms.")
+                except Exception as fe:
+                    print(f"[web-ws] Notice sending filler audio: {fe}")
+
         try:
             transcript, detected_lang = await asyncio.to_thread(
                 self.stt.transcribe, audio_bytes, self.language_code
@@ -500,7 +517,12 @@ class WebVoiceSession:
 
         if not transcript.strip():
             print(f"⚠️ [web-ws] STT ({self.stt.provider}) returned empty transcript for {audio_dur:.2f}s audio (RMS: {audio_rms:.4f})")
-            await self.ws.send_json({"event": "empty_transcript", "rms": audio_rms, "duration": audio_dur})
+            await self.ws.send_json({
+                "event": "empty_transcript",
+                "rms": audio_rms,
+                "duration": audio_dur,
+                "had_filler": filler_sent,
+            })
             return
 
         print(f"🎙️ [web-ws] User [{detected_lang}]: {transcript}")

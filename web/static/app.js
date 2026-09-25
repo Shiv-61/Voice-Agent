@@ -390,6 +390,10 @@ class VoiceAgentApp {
       this.updateStateText(
         `Checking records for: "${msg.text.length > 60 ? msg.text.slice(0, 60) + "…" : msg.text}"`,
       );
+    } else if (msg.event === "agent_filler") {
+      this.updateStateText("Checking official university records…");
+      this.micOrb.classList.add("agent-speaking");
+      this.interruptBtn.style.display = "inline-flex";
     } else if (msg.event === "agent_thinking") {
       this.updateStateText(
         "Checking official records and preparing your answer…",
@@ -423,6 +427,9 @@ class VoiceAgentApp {
       this.interruptAgent();
       this.updateStateText("Listening — please speak your question.");
     } else if (msg.event === "empty_transcript") {
+      if (msg.had_filler && this.isPlayingAudio) {
+        this.interruptAgent();
+      }
       const dur = msg.duration ? `(${msg.duration.toFixed(1)}s)` : "";
       const rms = msg.rms !== undefined ? msg.rms : 0;
       let hint = "Didn't catch any words in that audio.";
