@@ -17,6 +17,29 @@ except ImportError:
     PSYCOPG2_AVAILABLE = False
 
 
+INDIC_NAME_MAP = {
+    # Gujarati
+    "આરવ": "Aarav", "પટેલ": "Patel",
+    "રાજ": "Raj", "મહેતા": "Mehta",
+    "રિયા": "Riya", "શર્મા": "Sharma",
+    "દેવ": "Dev", "શાહ": "Shah",
+    "પ્રિયા": "Priya",
+    # Hindi
+    "आरव": "Aarav", "पटेल": "Patel",
+    "राज": "Raj", "मेहता": "Mehta",
+    "रिया": "Riya", "शर्मा": "Sharma",
+    "देव": "Dev", "शाह": "Shah",
+    "प्रिया": "Priya",
+}
+
+
+def transliterate_student_name(identifier: str) -> str:
+    """Translates common Hindi and Gujarati student names to Latin script."""
+    tokens = identifier.strip().split()
+    translated = [INDIC_NAME_MAP.get(t, t) for t in tokens]
+    return " ".join(translated)
+
+
 class Database:
     def __init__(self):
         self.use_sqlite = False
@@ -112,29 +135,29 @@ class Database:
                 return [dict(row) for row in rows]
         except Exception as err:
             print(f"[db] Query error: {err}")
-            return []
-
     # ------------------------------------------------------------------
     # Domain Queries (Tools for Agent)
     # ------------------------------------------------------------------
 
     def lookup_student(self, identifier: str) -> dict | None:
-        """Lookup student by ID or Name."""
+        """Lookup student by ID or Name (supports English, Hindi, and Gujarati scripts)."""
+        clean_id = transliterate_student_name(identifier)
         query = """
             SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
             FROM students s
             JOIN departments d ON s.department_id = d.department_id
-            WHERE LOWER(s.student_id) = LOWER(?) OR LOWER(s.name) LIKE LOWER(?)
+            WHERE LOWER(s.student_id) = LOWER(?) OR LOWER(s.name) LIKE LOWER(?) OR LOWER(s.name) LIKE LOWER(?)
             LIMIT 1
         """ if self.use_sqlite else """
             SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
             FROM students s
             JOIN departments d ON s.department_id = d.department_id
-            WHERE LOWER(s.student_id) = LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s)
+            WHERE LOWER(s.student_id) = LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s)
             LIMIT 1
         """
-        pattern = f"%{identifier}%"
-        results = self._execute_query(query, (identifier, pattern))
+        pattern_orig = f"%{identifier}%"
+        pattern_clean = f"%{clean_id}%"
+        results = self._execute_query(query, (clean_id, pattern_clean, pattern_orig))
         return results[0] if results else None
 
     def get_student_marks(self, student_id: str) -> list[dict]:

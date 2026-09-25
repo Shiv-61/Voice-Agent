@@ -115,3 +115,43 @@ def clean_speech_text(text: str) -> str:
     # Normalize excessive whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+PROMPT_LEAK_PATTERNS = [
+    r"you are a (?:polite|helpful|professional|university|virtual|voice|ai)",
+    r"university admission & student desk assistant",
+    r"call initiation & welcome message",
+    r"welcome message flow",
+    r"strict safety & anti-abuse",
+    r"strict unaware",
+    r"voice call style & conversational rules",
+    r"10 to 15 words per sentence",
+    r"ai identity transparency",
+    r"natural spoken pronunciation",
+    r"exact language mirroring",
+    r"context continuity",
+    r"direct context utilization",
+    r"verified official university context",
+    r"end official context",
+    r"here'?s a thinking process",
+    r"thinking process",
+    r"the user is asking",
+    r"caller's current question",
+    r"caller's question",
+    r"preceding conversation",
+    r"system prompt",
+    r"available tools:",
+    r"tool calling:",
+    r"tool_result",
+]
+
+COMPILED_PROMPT_LEAK_REGEX = [re.compile(p, re.IGNORECASE) for p in PROMPT_LEAK_PATTERNS]
+
+
+def is_prompt_leak(text: str) -> bool:
+    """Detects whether text contains internal prompt instructions or meta-commentary."""
+    if not text:
+        return False
+    lower = text.strip().lower()
+    return any(r.search(lower) for r in COMPILED_PROMPT_LEAK_REGEX)
+

@@ -27,7 +27,7 @@ from stt import STT
 from tts import TTS
 from utils.filler_manager import FillerManager
 
-from utils import split_ready_sentences, is_hangup_intent, clean_speech_text
+from utils import split_ready_sentences, is_hangup_intent, clean_speech_text, is_prompt_leak
 
 
 # Initialize application
@@ -385,6 +385,9 @@ class WebVoiceSession:
                     for sentence in ready_sentences:
                         s = sentence.strip()
                         if s:
+                            if is_prompt_leak(s):
+                                print(f"🛑 [web-ws] Suppressed prompt leak from TTS: {s}")
+                                continue
                             await self.ws.send_json({
                                 "event": "agent_partial_text",
                                 "text": s,
@@ -398,14 +401,15 @@ class WebVoiceSession:
                 # Process buffer remainder
                 if buffer.strip():
                     rem = buffer.strip()
-                    await self.ws.send_json({
-                        "event": "agent_partial_text",
-                        "text": rem,
-                    })
-                    synth_task = asyncio.create_task(
-                        asyncio.to_thread(self.tts.synthesize, rem, detected_lang)
-                    )
-                    await sentence_queue.put(synth_task)
+                    if not is_prompt_leak(rem):
+                        await self.ws.send_json({
+                            "event": "agent_partial_text",
+                            "text": rem,
+                        })
+                        synth_task = asyncio.create_task(
+                            asyncio.to_thread(self.tts.synthesize, rem, detected_lang)
+                        )
+                        await sentence_queue.put(synth_task)
             finally:
                 await sentence_queue.put(None)  # Sentinel
 
