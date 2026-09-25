@@ -329,18 +329,19 @@ class WebVoiceSession:
     def _hook_llm_tools(self):
         """Wraps LLM tool execution to broadcast live tool events to the frontend."""
         original_execute = self.llm._execute_tool
+        loop = asyncio.get_event_loop()
 
         def wrapped_execute(tool_name: str, kwargs: dict) -> str:
-            # Broadcast tool execution event to client
-            import asyncio
+            # Broadcast tool execution event to client thread-safely
             try:
                 preview = f"{tool_name}({', '.join(f'{k}={v}' for k, v in kwargs.items())})"
-                asyncio.create_task(self.ws.send_json({
+                coro = self.ws.send_json({
                     "event": "tool_executed",
                     "tool": tool_name,
                     "args": kwargs,
                     "preview": preview,
-                }))
+                })
+                asyncio.run_coroutine_threadsafe(coro, loop)
             except Exception as err:
                 print(f"[web-ws] Error sending tool event: {err}")
             return original_execute(tool_name, kwargs)
@@ -534,7 +535,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
                             "call_hangup": False,
                         })
                         try:
-                            welcome_audio = session.tts.synthesize(WELCOME_MESSAGE, language_code="hi-IN")
+                            welcome_audio = await asyncio.to_thread(session.tts.synthesize, WELCOME_MESSAGE, language_code="hi-IN")
                             if welcome_audio:
                                 await websocket.send_bytes(welcome_audio)
                         except Exception as e:

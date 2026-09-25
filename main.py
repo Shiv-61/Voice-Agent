@@ -15,6 +15,13 @@ Modes:
 import argparse
 import re
 import sys
+
+# Ensure UTF-8 stdout and stderr encoding on Windows
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import uvicorn
 
 import config

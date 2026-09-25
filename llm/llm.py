@@ -279,9 +279,12 @@ class LLM:
                             # Detect whether model is issuing a tool call
                             if not is_streaming_speech and not is_tool_call:
                                 stream_buffer += token
+                                stripped = stream_buffer.lstrip()
                                 if "TOOL_CALL:" in stream_buffer:
                                     is_tool_call = True
-                                elif len(stream_buffer) >= 15 or "\n" in stream_buffer:
+                                elif "TOOL_CALL:".startswith(stripped):
+                                    continue
+                                elif len(stripped) >= 12 and "TOOL_CALL:" not in stream_buffer:
                                     is_streaming_speech = True
                                     yield stream_buffer
                                     full_reply += stream_buffer
@@ -291,6 +294,12 @@ class LLM:
                             if is_tool_call:
                                 stream_buffer += token
                             else:
+                                if "TOOL_CALL:" in token:
+                                    is_tool_call = True
+                                    is_streaming_speech = False
+                                    idx = token.index("TOOL_CALL:")
+                                    stream_buffer = token[idx:]
+                                    continue
                                 full_reply += token
                                 yield token
 
@@ -382,9 +391,12 @@ class LLM:
                             # Detect whether model is issuing a tool call
                             if not is_streaming_speech and not is_tool_call:
                                 stream_buffer += token
+                                stripped = stream_buffer.lstrip()
                                 if "TOOL_CALL:" in stream_buffer:
                                     is_tool_call = True
-                                elif len(stream_buffer) >= 15 or "\n" in stream_buffer:
+                                elif "TOOL_CALL:".startswith(stripped):
+                                    continue
+                                elif len(stripped) >= 12 and "TOOL_CALL:" not in stream_buffer:
                                     is_streaming_speech = True
                                     yield stream_buffer
                                     full_reply += stream_buffer
@@ -394,6 +406,12 @@ class LLM:
                             if is_tool_call:
                                 stream_buffer += token
                             else:
+                                if "TOOL_CALL:" in token:
+                                    is_tool_call = True
+                                    is_streaming_speech = False
+                                    idx = token.index("TOOL_CALL:")
+                                    stream_buffer = token[idx:]
+                                    continue
                                 full_reply += token
                                 yield token
 
