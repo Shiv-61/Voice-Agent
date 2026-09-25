@@ -77,15 +77,17 @@ async def get_system_status():
     """Checks the health of Ollama LLM, Sarvam AI API, Database, and Vector Store."""
     # 1. LLM status
     llm_status = "unavailable"
-    provider_label = "OpenRouter (Cloud)" if config.LLM_PROVIDER == "openrouter" else "Ollama (Local)"
-    active_model = config.LLM_MODEL
-
-    if config.LLM_PROVIDER == "openrouter":
-        if config.OPENROUTER_API_KEY and len(config.OPENROUTER_API_KEY) > 10:
-            llm_status = "ready"
-        else:
-            llm_status = "missing API key"
+    if config.LLM_PROVIDER == "sarvam":
+        provider_label = "Sarvam AI (Cloud)"
+        llm_status = "ready" if config.SARVAM_API_KEY and len(config.SARVAM_API_KEY) > 10 else "missing API key"
+    elif config.LLM_PROVIDER == "groq":
+        provider_label = "Groq (Cloud)"
+        llm_status = "ready" if config.GROQ_API_KEY and len(config.GROQ_API_KEY) > 10 else "missing API key"
+    elif config.LLM_PROVIDER == "openrouter":
+        provider_label = "OpenRouter (Cloud)"
+        llm_status = "ready" if config.OPENROUTER_API_KEY and len(config.OPENROUTER_API_KEY) > 10 else "missing API key"
     else:
+        provider_label = "Ollama (Local)"
         try:
             r = requests.get("http://localhost:11434/api/tags", timeout=1.5)
             if r.status_code == 200:
