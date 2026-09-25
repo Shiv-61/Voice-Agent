@@ -155,3 +155,36 @@ def is_prompt_leak(text: str) -> bool:
     lower = text.strip().lower()
     return any(r.search(lower) for r in COMPILED_PROMPT_LEAK_REGEX)
 
+
+COMMON_NOISE_HALLUCINATIONS = {
+    "thank you", "thank you.", "thanks", "thanks.", "thank you very much.",
+    "धन्यवाद", "धन्यवाद।", "शुक्रिया", "આભાર", "આભાર.",
+    "ha", "haan", "haa", "hum", "hmm", "uh", "um", "ah", "oh", "you", "the",
+    "bye", "okay", "yes", "no", "ok",
+    "हा", "हाँ", "हूँ", "हम्म", "હું", "હા", "ના",
+}
+
+
+def is_noise_hallucination(text: str, audio_dur: float = 1.0, audio_rms: float = 0.05) -> bool:
+    """
+    Detects whether an STT transcript is an artifact or hallucination produced from
+    ambient room noise, breathing, mouse clicks, or silence.
+    """
+    if not text:
+        return True
+    cleaned = text.strip()
+    # 1. Punctuation only or empty
+    if not re.search(r"[\w\u0900-\u097F\u0A80-\u0AFF]", cleaned):
+        return True
+
+    # 2. Very short audio or low RMS that produced common single-word silence hallucinations
+    lower = cleaned.lower().strip(".,!?। ")
+    if (audio_dur < 1.4 or audio_rms < 0.030) and lower in COMMON_NOISE_HALLUCINATIONS:
+        return True
+
+    # 3. Repeated hesitation or breath sounds (e.g., 'uhhh', 'hmmm', 'ahhh')
+    if re.fullmatch(r"(?:[uhmaoe]|hm)+", lower):
+        return True
+
+    return False
+

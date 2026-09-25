@@ -216,9 +216,9 @@ class LLM:
 
         lang_cue = "Respond in English: "
         lower = clean_user_text.lower()
-        if re.search(r"[\u0a80-\u0aff]", clean_user_text) or any(w in lower.split() for w in ["su", "shu", "ketli", "ketla", "che", "karo", "maate", "nathi", "aapo", "tame", "tamara"]):
+        if re.search(r"[\u0a80-\u0aff]", clean_user_text) or any(w in lower.split() for w in ["su", "shu", "ketli", "ketla", "che", "chhe", "karo", "maate", "nathi", "aapo", "tame", "tamara", "tamari", "tamaru", "kai", "kayi", "aavde", "bhanela", "kaho", "janavo"]):
             lang_cue = "Respond in Gujarati: "
-        elif re.search(r"[\u0900-\u097f]", clean_user_text) or any(w in lower.split() for w in ["kya", "kitna", "kitni", "hai", "batao", "hoga", "nahi", "kripya", "aapki", "kaise"]):
+        elif re.search(r"[\u0900-\u097f]", clean_user_text) or any(w in lower.split() for w in ["kya", "kitna", "kitni", "hai", "hain", "batao", "bata", "sakate", "sakthi", "sakthe", "hoga", "nahi", "kripya", "aapki", "aapka", "kaise", "kuch", "baare", "mein"]):
             lang_cue = "Respond in Hindi: "
 
         current_turn_content = f"{lang_cue}{clean_user_text}"

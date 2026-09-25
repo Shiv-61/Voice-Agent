@@ -20,12 +20,19 @@ class VoiceAgentApp {
     this.callStartTime = null;
     this.callTimerInterval = null;
 
-    // Auto-VAD threshold & timer state
-    this.vadThreshold = 0.009; // Filters mouse clicks and ambient hum
+    // Auto-VAD threshold & adaptive noise tracking state
+    this.noiseFloor = 0.012;
+    this.minSpeechThreshold = 0.024;
+    this.vadThreshold = 0.024;
+    this.consecutiveSpeechFrames = 0;
+    this.requiredSpeechFrames = 2; // ~170ms of sustained speech energy
+    this.consecutiveBargeInFrames = 0;
+    this.requiredBargeInFrames = 3; // ~250ms of sustained loud speech to barge in
     this.vadSilenceTimer = null;
-    this.vadSilenceDuration = 450; // Optimized sub-second conversational turn detection (450ms)
+    this.vadSilenceDuration = 550; // 550ms turn completion
     this.isSpeechDetected = false;
     this.callStartupGrace = 0;
+    this.playbackStartTime = 0;
 
     // Audio Playback Queue with Gapless Scheduling
     this.playbackQueue = [];
@@ -714,6 +721,8 @@ class VoiceAgentApp {
 
     this.audioChunks = [];
     this.isSpeechDetected = false;
+    this.consecutiveSpeechFrames = 0;
+    this.consecutiveBargeInFrames = 0;
 
     const handleAudioFrame = (input, rms) => {
       if (
@@ -723,63 +732,96 @@ class VoiceAgentApp {
       )
         return;
 
+      // Slowly track background noise floor when user isn't speaking and agent isn't playing
+      if (!this.isSpeechDetected && !this.isPlayingAudio) {
+        this.noiseFloor = this.noiseFloor * 0.95 + rms * 0.05;
+      }
+
+      // Dynamic speech threshold anchored safely above room noise floor
+      const dynamicSpeechThreshold = Math.max(
+        this.minSpeechThreshold,
+        this.noiseFloor * 2.5 + 0.012,
+      );
+
       // --- BARGE-IN: If customer speaks while agent is speaking, stop agent immediately ---
       if (this.isPlayingAudio) {
-        if (rms > this.vadThreshold * 1.3) {
-          console.log(
-            "🛑 Caller interrupted while agent was speaking. Stopping agent playback.",
-          );
-          this.interruptAgent();
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ event: "interrupt" }));
+        const playbackElapsed = Date.now() - (this.playbackStartTime || 0);
+        const bargeInThreshold = Math.max(0.045, dynamicSpeechThreshold * 1.8);
+
+        // 350ms playback start grace period to reject speaker turn-on sound
+        if (playbackElapsed > 350 && rms > bargeInThreshold) {
+          this.consecutiveBargeInFrames++;
+          if (this.consecutiveBargeInFrames >= this.requiredBargeInFrames) {
+            console.log(
+              `🛑 Caller interrupted while agent was speaking (RMS: ${rms.toFixed(3)} > ${bargeInThreshold.toFixed(3)}). Stopping agent playback.`,
+            );
+            this.interruptAgent();
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(JSON.stringify({ event: "interrupt" }));
+            }
+            this.isSpeechDetected = true;
+            this.consecutiveSpeechFrames = this.requiredSpeechFrames;
+            this.micOrb.classList.add("active");
+            this.updateStateText(
+              "Listening — I stopped speaking, please go ahead.",
+            );
+            this.audioChunks = [new Float32Array(input)];
+            if (this.vadSilenceTimer) {
+              clearTimeout(this.vadSilenceTimer);
+              this.vadSilenceTimer = null;
+            }
           }
-          this.isSpeechDetected = true;
-          this.micOrb.classList.add("active");
-          this.updateStateText(
-            "Listening — I stopped speaking, please go ahead.",
-          );
-          this.audioChunks = [new Float32Array(input)];
-          if (this.vadSilenceTimer) {
-            clearTimeout(this.vadSilenceTimer);
-            this.vadSilenceTimer = null;
-          }
+        } else {
+          this.consecutiveBargeInFrames = 0;
         }
         return;
       }
 
-      if (rms > this.vadThreshold) {
-        // Speech detected
-        if (!this.isSpeechDetected) {
-          this.isSpeechDetected = true;
-          this.micOrb.classList.add("active");
-          this.updateStateText("Listening — I can hear you, keep speaking.");
-        }
-        this.audioChunks.push(new Float32Array(input));
+      this.consecutiveBargeInFrames = 0;
 
-        // Clear silence timeout
-        if (this.vadSilenceTimer) {
-          clearTimeout(this.vadSilenceTimer);
-          this.vadSilenceTimer = null;
-        }
+      // --- SPEECH DETECTION ---
+      if (rms > dynamicSpeechThreshold) {
+        this.consecutiveSpeechFrames++;
 
-        // Safety auto-commit if speaking continuously for > 8.0s
-        const currentLen = this.audioChunks.reduce(
-          (acc, c) => acc + c.length,
-          0,
-        );
-        const actualRate =
-          (this.audioContext && this.audioContext.sampleRate) || 16000;
-        if (currentLen > actualRate * 8.0) {
-          this.commitAutoVadSpeech();
-        }
-      } else if (this.isSpeechDetected) {
-        // Still buffer during natural speech pauses
-        this.audioChunks.push(new Float32Array(input));
+        // Only confirm speech after sustained energy (rejects single-frame mouse clicks / coughs)
+        if (this.consecutiveSpeechFrames >= this.requiredSpeechFrames) {
+          if (!this.isSpeechDetected) {
+            this.isSpeechDetected = true;
+            this.micOrb.classList.add("active");
+            this.updateStateText("Listening — I can hear you, keep speaking.");
+          }
+          this.audioChunks.push(new Float32Array(input));
 
-        if (!this.vadSilenceTimer) {
-          this.vadSilenceTimer = setTimeout(() => {
+          // Clear silence timeout while actively speaking
+          if (this.vadSilenceTimer) {
+            clearTimeout(this.vadSilenceTimer);
+            this.vadSilenceTimer = null;
+          }
+
+          // Safety auto-commit if speaking continuously for > 8.0s
+          const currentLen = this.audioChunks.reduce(
+            (acc, c) => acc + c.length,
+            0,
+          );
+          const actualRate =
+            (this.audioContext && this.audioContext.sampleRate) || 16000;
+          if (currentLen > actualRate * 8.0) {
             this.commitAutoVadSpeech();
-          }, this.vadSilenceDuration);
+          }
+        }
+      } else {
+        // Below speech threshold
+        this.consecutiveSpeechFrames = 0;
+
+        if (this.isSpeechDetected) {
+          // Still buffer during natural speech pauses
+          this.audioChunks.push(new Float32Array(input));
+
+          if (!this.vadSilenceTimer) {
+            this.vadSilenceTimer = setTimeout(() => {
+              this.commitAutoVadSpeech();
+            }, this.vadSilenceDuration);
+          }
         }
       }
     };
@@ -840,8 +882,10 @@ class VoiceAgentApp {
 
   commitAutoVadSpeech() {
     this.isSpeechDetected = false;
+    this.consecutiveSpeechFrames = 0;
+    this.consecutiveBargeInFrames = 0;
     this.micOrb.classList.remove("active");
-    this.updateStateText("Writing down what you said…");
+    this.updateStateText("Processing what you said…");
 
     const totalLength = this.audioChunks.reduce(
       (acc, chunk) => acc + chunk.length,
@@ -849,7 +893,7 @@ class VoiceAgentApp {
     );
     const actualSampleRate =
       (this.audioContext && this.audioContext.sampleRate) || 16000;
-    const minSamples = Math.round(actualSampleRate * 0.25);
+    const minSamples = Math.round(actualSampleRate * 0.45);
     if (totalLength < minSamples) {
       this.audioChunks = [];
       this.updateStateText("Listening. Speak whenever you are ready.");
@@ -858,11 +902,23 @@ class VoiceAgentApp {
 
     const mergedBuffer = new Float32Array(totalLength);
     let offset = 0;
+    let sumSquares = 0;
     for (const chunk of this.audioChunks) {
       mergedBuffer.set(chunk, offset);
+      for (let i = 0; i < chunk.length; i++) {
+        sumSquares += chunk[i] * chunk[i];
+      }
       offset += chunk.length;
     }
     this.audioChunks = [];
+
+    // Verify overall RMS of recorded audio. If below speech threshold, discard as ambient noise
+    const overallRms = Math.sqrt(sumSquares / totalLength);
+    if (overallRms < this.minSpeechThreshold * 0.70) {
+      console.log(`🔇 Discarded ambient noise buffer (RMS: ${overallRms.toFixed(4)})`);
+      this.updateStateText("Listening. Speak whenever you are ready.");
+      return;
+    }
 
     // Cleanly resample to 16000Hz expected by Sarvam STT
     const resampled = this.resampleTo16k(mergedBuffer, actualSampleRate);
@@ -1032,6 +1088,9 @@ class VoiceAgentApp {
   async scheduleNextAudioChunks() {
     if (this.playbackQueue.length === 0) return;
 
+    if (!this.isPlayingAudio) {
+      this.playbackStartTime = Date.now();
+    }
     this.isPlayingAudio = true;
     this.micOrb.classList.add("agent-speaking");
     this.interruptBtn.style.display = "inline-flex";

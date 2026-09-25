@@ -10,6 +10,7 @@ class VoiceAgentAudioProcessor extends AudioWorkletProcessor {
     this.bufferSize = 4096;
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
+    this.sumSquares = 0;
   }
 
   process(inputs, outputs, parameters) {
@@ -18,23 +19,21 @@ class VoiceAgentAudioProcessor extends AudioWorkletProcessor {
 
     const channelData = input[0];
 
-    // Calculate instantaneous RMS energy of the current 128-sample render quantum
-    let sum = 0;
+    // Accumulate samples and sum of squares into buffer
     for (let i = 0; i < channelData.length; i++) {
-      sum += channelData[i] * channelData[i];
-    }
-    const rms = Math.sqrt(sum / channelData.length);
+      const s = channelData[i];
+      this.buffer[this.bufferIndex++] = s;
+      this.sumSquares += s * s;
 
-    // Accumulate samples into buffer and transmit once full
-    for (let i = 0; i < channelData.length; i++) {
-      this.buffer[this.bufferIndex++] = channelData[i];
       if (this.bufferIndex >= this.bufferSize) {
+        const bufferRms = Math.sqrt(this.sumSquares / this.bufferSize);
         this.port.postMessage({
           event: "audio_data",
           buffer: this.buffer.slice(0),
-          rms: rms,
+          rms: bufferRms,
         });
         this.bufferIndex = 0;
+        this.sumSquares = 0;
       }
     }
 

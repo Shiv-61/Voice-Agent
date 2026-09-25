@@ -27,7 +27,7 @@ from stt import STT
 from tts import TTS
 from utils.filler_manager import FillerManager
 
-from utils import split_ready_sentences, is_hangup_intent, clean_speech_text, is_prompt_leak
+from utils import split_ready_sentences, is_hangup_intent, clean_speech_text, is_prompt_leak, is_noise_hallucination
 
 
 # Initialize application
@@ -472,6 +472,17 @@ class WebVoiceSession:
                     audio_rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
                 print(f"🎙️ [web-ws] Received audio: {len(audio_bytes)} bytes, {audio_dur:.2f}s, {framerate}Hz, RMS: {audio_rms:.4f}")
 
+                # Server-side acoustic noise gate to reject ambient room hum, breathing, and mic thuds
+                if audio_dur < 0.40 or audio_rms < 0.016:
+                    print(f"🔇 [web-ws] Rejected ambient noise snippet: {audio_dur:.2f}s, RMS: {audio_rms:.4f}")
+                    await self.ws.send_json({
+                        "event": "empty_transcript",
+                        "rms": audio_rms,
+                        "duration": audio_dur,
+                        "had_filler": False,
+                    })
+                    return
+
                 if framerate != 16000 and framerate > 0:
                     print(f"🎙️ [web-ws] Normalizing audio from {framerate}Hz ({channels}ch) to 16000Hz mono...")
                     if channels > 1:
@@ -490,7 +501,7 @@ class WebVoiceSession:
             print(f"⚠️ [web-ws] Audio normalization notice: {e}")
 
         filler_sent = False
-        if audio_dur >= 0.7 and audio_rms >= 0.002:
+        if audio_dur >= 0.8 and audio_rms >= 0.024:
             filler_audio = self.filler_mgr.get_filler(self.language_code)
             if filler_audio:
                 try:
@@ -519,8 +530,8 @@ class WebVoiceSession:
             await self.ws.send_json({"event": "error", "message": user_msg})
             return
 
-        if not transcript.strip():
-            print(f"⚠️ [web-ws] STT ({self.stt.provider}) returned empty transcript for {audio_dur:.2f}s audio (RMS: {audio_rms:.4f})")
+        if not transcript.strip() or is_noise_hallucination(transcript, audio_dur, audio_rms):
+            print(f"🔇 [web-ws] Filtered noise/silence artifact: \"{transcript.strip()}\" ({audio_dur:.2f}s, RMS: {audio_rms:.4f})")
             await self.ws.send_json({
                 "event": "empty_transcript",
                 "rms": audio_rms,
@@ -683,7 +694,9 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     audio_chunks: list[bytes] = []
     is_speech_active = False
     last_speech_time = 0.0
-    vad_threshold = 0.008
+    vad_threshold = 0.024
+    consecutive_speech = 0
+    consecutive_barge = 0
     active_turn_task = None
     is_playing_audio = False
 
@@ -716,7 +729,8 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
     async def process_caller_audio(raw_pcm: bytes):
         nonlocal active_turn_task
-        if len(raw_pcm) < 16000 * 2 * 0.4:
+        dur = len(raw_pcm) / 32000.0
+        if dur < 0.45:
             return
         # Package into 16kHz mono WAV
         out_bio = io.BytesIO()
@@ -725,13 +739,14 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
             wf.setsampwidth(2)
             wf.setframerate(16000)
             wf.writeframes(raw_pcm)
-        wav_payload = out_bio.getvalue()
+        wav_data = out_bio.getvalue()
+
+        transcript, detected_lang = await asyncio.to_thread(stt.transcribe, wav_data, config.DEFAULT_LANGUAGE)
+        if not transcript.strip() or is_noise_hallucination(transcript, dur, 0.04):
+            print(f"🔇 [vobiz-ws] Discarded noise artifact: \"{transcript.strip()}\"")
+            return
 
         try:
-            transcript, detected_lang = await asyncio.to_thread(stt.transcribe, wav_payload)
-            if not transcript.strip():
-                return
-
             print(f"🎙️ [vobiz-ws] Caller [{detected_lang}]: {transcript}")
             is_hangup = is_hangup_intent(transcript)
 
@@ -786,36 +801,47 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
 
                 # Barge-in: if caller interrupts while agent is speaking, clear audio
-                if is_playing_audio and rms > vad_threshold * 1.3:
-                    print("🛑 [vobiz-ws] Barge-in from caller. Clearing playback queue.")
-                    if active_turn_task and not active_turn_task.done():
-                        active_turn_task.cancel()
-                    is_playing_audio = False
-                    await websocket.send_text(json.dumps({
-                        "event": "clearAudio",
-                        "streamId": stream_id,
-                    }))
-                    audio_chunks = [chunk_bytes]
-                    is_speech_active = True
-                    last_speech_time = asyncio.get_event_loop().time()
+                if is_playing_audio:
+                    if rms > 0.045:
+                        consecutive_barge += 1
+                        if consecutive_barge >= 2:
+                            print("🛑 [vobiz-ws] Barge-in confirmed from caller. Clearing playback queue.")
+                            if active_turn_task and not active_turn_task.done():
+                                active_turn_task.cancel()
+                            is_playing_audio = False
+                            await websocket.send_text(json.dumps({
+                                "event": "clearAudio",
+                                "streamId": stream_id,
+                            }))
+                            audio_chunks = [chunk_bytes]
+                            is_speech_active = True
+                            last_speech_time = asyncio.get_event_loop().time()
+                    else:
+                        consecutive_barge = 0
                     continue
 
+                consecutive_barge = 0
+
                 if rms > vad_threshold:
-                    if not is_speech_active:
-                        is_speech_active = True
-                    audio_chunks.append(chunk_bytes)
-                    last_speech_time = asyncio.get_event_loop().time()
-                elif is_speech_active:
-                    audio_chunks.append(chunk_bytes)
-                    # Check 0.5s silence commit (reduced from 2.0s for sub-second turnaround)
-                    now = asyncio.get_event_loop().time()
-                    if now - last_speech_time >= 0.5:
-                        is_speech_active = False
-                        total_pcm = b"".join(audio_chunks)
-                        audio_chunks = []
-                        if active_turn_task and not active_turn_task.done():
-                            active_turn_task.cancel()
-                        active_turn_task = asyncio.create_task(process_caller_audio(total_pcm))
+                    consecutive_speech += 1
+                    if consecutive_speech >= 2:
+                        if not is_speech_active:
+                            is_speech_active = True
+                        audio_chunks.append(chunk_bytes)
+                        last_speech_time = asyncio.get_event_loop().time()
+                else:
+                    consecutive_speech = 0
+                    if is_speech_active:
+                        audio_chunks.append(chunk_bytes)
+                        # Check 0.55s silence commit
+                        now = asyncio.get_event_loop().time()
+                        if now - last_speech_time >= 0.55:
+                            is_speech_active = False
+                            total_pcm = b"".join(audio_chunks)
+                            audio_chunks = []
+                            if active_turn_task and not active_turn_task.done():
+                                active_turn_task.cancel()
+                            active_turn_task = asyncio.create_task(process_caller_audio(total_pcm))
 
             elif event == "playedStream":
                 is_playing_audio = False
