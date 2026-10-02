@@ -61,7 +61,10 @@ class FillerManager:
                 print(f"[filler] Warning: failed to pre-cache {lang_prefix} filler: {e}")
 
     def get_filler(self, language_code: str | None = None) -> bytes | None:
-        """Returns pre-cached audio bytes in 0.1ms."""
+        """Returns pre-cached audio bytes in 0.1ms only if enabled."""
+        import config
+        if not getattr(config, "ENABLE_ACOUSTIC_FILLER", False):
+            return None
         code = (language_code or "en").split("-")[0].lower()
         if code in self.cache:
             return self.cache[code]

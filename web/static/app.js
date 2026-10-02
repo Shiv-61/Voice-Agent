@@ -29,7 +29,7 @@ class VoiceAgentApp {
     this.consecutiveBargeInFrames = 0;
     this.requiredBargeInFrames = 3; // ~250ms of sustained loud speech to barge in
     this.vadSilenceTimer = null;
-    this.vadSilenceDuration = 550; // 550ms turn completion
+    this.vadSilenceDuration = 750; // 750ms natural turn completion pause
     this.isSpeechDetected = false;
     this.callStartupGrace = 0;
     this.playbackStartTime = 0;
@@ -56,8 +56,13 @@ class VoiceAgentApp {
     this.initUxEnhancements();
 
     this.startCanvasAnimation();
-    setInterval(() => this.checkSystemStatus(), 10000);
-    setInterval(() => this.loadCallHistory(), 15000);
+    // Fix #24: Smart polling — pause during active call, resume when idle
+    this._statusPollInterval = setInterval(() => {
+      if (!this.isCallActive) this.checkSystemStatus();
+    }, 30000); // 30s when idle (was 10s unconditionally)
+    this._historyPollInterval = setInterval(() => {
+      if (!this.isCallActive) this.loadCallHistory();
+    }, 20000); // 20s when idle (paused during call)
   }
 
   initElements() {
@@ -71,6 +76,8 @@ class VoiceAgentApp {
     this.interruptBtn = document.getElementById("interruptBtn");
     this.modeAutoVadBtn = document.getElementById("modeAutoVadBtn");
     this.modePttBtn = document.getElementById("modePttBtn");
+    this.textQueryInput = document.getElementById("textQueryInput");
+    this.sendTextQueryBtn = document.getElementById("sendTextQueryBtn");
 
     this.micOrb = document.getElementById("micOrb");
     this.agentStateText = document.getElementById("agentStateText");
@@ -78,6 +85,13 @@ class VoiceAgentApp {
     this.themeToggle = document.getElementById("themeToggle");
     this.wsStatusBadge = document.getElementById("wsStatusBadge");
     this.callDuration = document.getElementById("callDuration");
+
+    // Live Conversation Feed
+    this.conversationFeed = document.getElementById("conversationFeed");
+    this.clearConversationBtn = document.getElementById("clearConversationBtn");
+    this.currentAssistantBubble = null;
+    this.currentAssistantTextSpan = null;
+    this.currentThinkingIndicator = null;
 
     // Call History
     this.callHistoryBody = document.getElementById("callHistoryBody");
@@ -116,6 +130,15 @@ class VoiceAgentApp {
     this.closeAddStudentBtn = document.getElementById("closeAddStudentBtn");
     this.cancelAddStudentBtn = document.getElementById("cancelAddStudentBtn");
     this.addStudentForm = document.getElementById("addStudentForm");
+
+    // Delete Document Modal
+    this.deleteDocModal = document.getElementById("deleteDocModal");
+    this.closeDeleteModalBtn = document.getElementById("closeDeleteModalBtn");
+    this.cancelDeleteBtn = document.getElementById("cancelDeleteBtn");
+    this.confirmDeleteBtn = document.getElementById("confirmDeleteBtn");
+    this.deleteDocName = document.getElementById("deleteDocName");
+    this.pendingDeleteDocId = null;
+    this.pendingDeleteDocName = null;
   }
 
   initEventListeners() {
@@ -168,6 +191,9 @@ class VoiceAgentApp {
       this.startPushToTalk(),
     );
     window.addEventListener("mouseup", () => this.stopPushToTalk());
+    window.addEventListener("pointerup", () => this.stopPushToTalk());
+    window.addEventListener("pointercancel", () => this.stopPushToTalk());
+    window.addEventListener("blur", () => this.stopPushToTalk());
     this.pushToTalkBtn.addEventListener("touchstart", (e) => {
       e.preventDefault();
       this.startPushToTalk();
@@ -175,7 +201,42 @@ class VoiceAgentApp {
     window.addEventListener("touchend", () => this.stopPushToTalk());
 
     // Interrupt Button
-    this.interruptBtn.addEventListener("click", () => this.interruptAgent());
+    this.interruptBtn.addEventListener("click", () => this.interruptAgent(true));
+
+    // Instant Text Question Form
+    if (this.sendTextQueryBtn && this.textQueryInput) {
+      const submitQuery = () => {
+        const val = this.textQueryInput.value.trim();
+        if (!val) return;
+        this.sendTextQuery(val);
+        this.textQueryInput.value = "";
+      };
+      this.sendTextQueryBtn.addEventListener("click", submitQuery);
+      this.textQueryInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") submitQuery();
+      });
+    }
+
+    // Clear Conversation Feed listener
+    if (this.clearConversationBtn && this.conversationFeed) {
+      this.clearConversationBtn.addEventListener("click", () => {
+        this.conversationFeed.innerHTML = `
+          <div class="msg-bubble assistant-bubble" style="display: flex; gap: 10px; align-items: flex-start;">
+            <span style="background: var(--primary, #3b82f6); color: white; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">P</span>
+            <div style="flex: 1; background: var(--surface); padding: 10px 14px; border-radius: 0 12px 12px 12px; border: 1px solid var(--border); line-height: 1.45; color: var(--ink);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <span style="font-weight: 600; font-size: 0.78rem; color: var(--primary, #3b82f6);">Priya (DDU IT)</span>
+                <span class="lang-tag" style="font-size: 0.68rem; background: var(--border); padding: 1px 6px; border-radius: 4px; color: var(--muted);">ગુજરાતી</span>
+              </div>
+              <span class="bubble-text">નમસ્તે, હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા વાત કરું છું. હું તમારી શું મદદ કરી શકું? તમે ગુજરાતી, હિન્દી અથવા અંગ્રેજીમાં વાત કરી શકો છો.</span>
+            </div>
+          </div>
+        `;
+        this.currentAssistantBubble = null;
+        this.currentAssistantTextSpan = null;
+        this.currentThinkingIndicator = null;
+      });
+    }
 
     // Call History refresh
     if (this.refreshCallsBtn) {
@@ -211,6 +272,45 @@ class VoiceAgentApp {
 
     this.refreshDocsBtn.addEventListener("click", () => this.loadDocuments());
 
+    // Documents Table Event Delegation (Inspect & Delete)
+    if (this.documentsTableBody) {
+      this.documentsTableBody.addEventListener("click", (e) => {
+        const deleteBtn = e.target.closest(".btn-delete");
+        if (deleteBtn) {
+          e.preventDefault();
+          const docId = deleteBtn.getAttribute("data-doc-id");
+          const filename = deleteBtn.getAttribute("data-filename") || "document";
+          this.openDeleteModal(docId, filename);
+          return;
+        }
+
+        const inspectBtn = e.target.closest(".btn-inspect");
+        if (inspectBtn) {
+          e.preventDefault();
+          const docId = inspectBtn.getAttribute("data-doc-id");
+          const filename = inspectBtn.getAttribute("data-filename") || "document";
+          this.inspectChunks(docId, filename);
+          return;
+        }
+      });
+    }
+
+    // Delete Document Modal Listeners
+    if (this.closeDeleteModalBtn) {
+      this.closeDeleteModalBtn.addEventListener("click", () => this.closeDeleteModal());
+    }
+    if (this.cancelDeleteBtn) {
+      this.cancelDeleteBtn.addEventListener("click", () => this.closeDeleteModal());
+    }
+    if (this.confirmDeleteBtn) {
+      this.confirmDeleteBtn.addEventListener("click", () => this.confirmDeleteDocument());
+    }
+    if (this.deleteDocModal) {
+      this.deleteDocModal.addEventListener("click", (e) => {
+        if (e.target === this.deleteDocModal) this.closeDeleteModal();
+      });
+    }
+
     // RAG Search Tester
     this.ragSearchBtn.addEventListener("click", () => this.executeRagSearch());
     this.ragSearchInput.addEventListener("keydown", (e) => {
@@ -231,9 +331,18 @@ class VoiceAgentApp {
     });
 
     // Chunk Inspector Modal
-    this.closeInspectorBtn.addEventListener("click", () => {
-      this.chunkInspectorModal.style.display = "none";
-    });
+    if (this.closeInspectorBtn) {
+      this.closeInspectorBtn.addEventListener("click", () => {
+        if (this.chunkInspectorModal) this.chunkInspectorModal.style.display = "none";
+      });
+    }
+    if (this.chunkInspectorModal) {
+      this.chunkInspectorModal.addEventListener("click", (e) => {
+        if (e.target === this.chunkInspectorModal) {
+          this.chunkInspectorModal.style.display = "none";
+        }
+      });
+    }
 
     // Add Student Modal
     this.openAddStudentModalBtn.addEventListener("click", () => {
@@ -336,10 +445,13 @@ class VoiceAgentApp {
 
     this.ws.onopen = () => {
       this.setWsBadge("connected", "Online & Ready");
+      const isReconnect = !!this.hasConnectedOnce;
+      this.hasConnectedOnce = true;
       this.ws.send(
         JSON.stringify({
           event: "start",
           language_code: this.languageSelect.value,
+          is_reconnect: isReconnect,
         }),
       );
     };
@@ -397,6 +509,11 @@ class VoiceAgentApp {
       this.updateStateText(
         `Checking records for: "${msg.text.length > 60 ? msg.text.slice(0, 60) + "…" : msg.text}"`,
       );
+      if (msg.language && this.languageSelect) {
+        this.languageSelect.value = msg.language;
+      }
+      this.addUserMessageBubble(msg.text, msg.language);
+      this.showThinkingIndicator();
     } else if (msg.event === "agent_filler") {
       this.updateStateText("Checking official university records…");
       this.micOrb.classList.add("agent-speaking");
@@ -405,12 +522,18 @@ class VoiceAgentApp {
       this.updateStateText(
         "Checking official records and preparing your answer…",
       );
+      this.showThinkingIndicator();
     } else if (msg.event === "tool_executed") {
-      // Tool runs are recorded server-side; nothing to display.
+      this.addToolExecutionBadge(msg.tool, msg.args, msg.preview);
     } else if (msg.event === "agent_partial_text") {
       this.updateStateText("Assistant is answering — listen closely.");
       this.interruptBtn.style.display = "inline-flex";
+      this.appendAssistantStreamingChunk(msg.text);
     } else if (msg.event === "agent_done") {
+      if (msg.language && this.languageSelect) {
+        this.languageSelect.value = msg.language;
+      }
+      this.finalizeAssistantBubble(msg.full_text, msg.language, msg.call_hangup);
       if (msg.call_hangup) {
         this.updateStateText("Call concluded. Disconnecting...");
       } else {
@@ -428,14 +551,17 @@ class VoiceAgentApp {
       if (this.isCallActive) {
         this.toggleVoiceCall();
       }
+      this.finalizeAssistantBubble(null, null, true);
       this.updateStateText("Call disconnected and logged.");
       setTimeout(() => this.loadCallHistory(), 1500);
     } else if (msg.event === "interrupted") {
-      this.interruptAgent();
+      this.interruptAgent(false);
+      this.finalizeAssistantBubble(null, null, false);
       this.updateStateText("Listening — please speak your question.");
     } else if (msg.event === "empty_transcript") {
+      this.removeThinkingIndicator();
       if (msg.had_filler && this.isPlayingAudio) {
-        this.interruptAgent();
+        this.interruptAgent(false);
       }
       const dur = msg.duration ? `(${msg.duration.toFixed(1)}s)` : "";
       const rms = msg.rms !== undefined ? msg.rms : 0;
@@ -450,9 +576,144 @@ class VoiceAgentApp {
       }
       this.updateStateText(hint);
     } else if (msg.event === "error") {
+      this.removeThinkingIndicator();
       this.updateStateText(
         msg.message || "Something went wrong while answering.",
       );
+    }
+  }
+
+  // =========================================================================
+  // Live Conversation Transcript Stream Helpers
+  // =========================================================================
+
+  getLanguageLabel(code) {
+    const map = {
+      "gu-IN": "ગુજરાતી",
+      "gu": "ગુજરાતી",
+      "hi-IN": "हिंदी",
+      "hi": "हिंदी",
+      "en-IN": "English",
+      "en": "English",
+    };
+    return map[code] || (this.languageSelect ? this.languageSelect.options[this.languageSelect.selectedIndex]?.text : "ગુજરાતી");
+  }
+
+  addUserMessageBubble(text, lang) {
+    if (!this.conversationFeed) return;
+    this.removeThinkingIndicator();
+    this.currentAssistantBubble = null;
+    this.currentAssistantTextSpan = null;
+
+    const langLabel = this.getLanguageLabel(lang);
+    const bubble = document.createElement("div");
+    bubble.className = "msg-bubble user-bubble";
+    bubble.style.cssText = "display: flex; gap: 10px; justify-content: flex-end; align-items: flex-start; margin-top: 4px;";
+    bubble.innerHTML = `
+      <div style="max-width: 82%; background: var(--primary, #3b82f6); color: white; padding: 10px 14px; border-radius: 12px 0 12px 12px; line-height: 1.45; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; gap: 8px;">
+          <span style="font-weight: 600; font-size: 0.76rem; opacity: 0.9;">You</span>
+          <span style="font-size: 0.68rem; background: rgba(255,255,255,0.22); padding: 1px 6px; border-radius: 4px;">${langLabel}</span>
+        </div>
+        <span style="font-size: 0.9rem;">${this.escapeHtml(text)}</span>
+      </div>
+      <span style="background: var(--ink-subtle, #64748b); color: white; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.72rem; font-weight: 700; flex-shrink: 0;">U</span>
+    `;
+    this.conversationFeed.appendChild(bubble);
+    this.scrollConversationFeed();
+  }
+
+  showThinkingIndicator() {
+    if (!this.conversationFeed || this.currentThinkingIndicator) return;
+    const indicator = document.createElement("div");
+    indicator.className = "msg-bubble thinking-bubble";
+    indicator.style.cssText = "display: flex; gap: 10px; align-items: center; margin: 4px 0;";
+    indicator.innerHTML = `
+      <span style="background: var(--primary, #3b82f6); color: white; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0;">P</span>
+      <div style="background: var(--surface); padding: 8px 12px; border-radius: 0 10px 10px 10px; border: 1px solid var(--border); font-size: 0.8rem; color: var(--muted); display: inline-flex; align-items: center; gap: 6px;">
+        <span>Priya is checking university records…</span>
+      </div>
+    `;
+    this.conversationFeed.appendChild(indicator);
+    this.currentThinkingIndicator = indicator;
+    this.scrollConversationFeed();
+  }
+
+  removeThinkingIndicator() {
+    if (this.currentThinkingIndicator && this.currentThinkingIndicator.parentNode) {
+      this.currentThinkingIndicator.remove();
+    }
+    this.currentThinkingIndicator = null;
+  }
+
+  addToolExecutionBadge(toolName, args, preview) {
+    if (!this.conversationFeed) return;
+    const badge = document.createElement("div");
+    badge.style.cssText = "display: flex; align-items: center; gap: 6px; padding: 4px 10px; background: rgba(59, 130, 246, 0.08); border: 1px dashed rgba(59, 130, 246, 0.3); border-radius: 6px; font-size: 0.76rem; color: var(--primary, #3b82f6); margin: 2px 0 2px 36px; max-width: fit-content;";
+    const label = preview || `${toolName}()`;
+    badge.innerHTML = `<span>🛠️</span> <span class="mono">${this.escapeHtml(label)}</span>`;
+    this.conversationFeed.appendChild(badge);
+    this.scrollConversationFeed();
+  }
+
+  appendAssistantStreamingChunk(sentence) {
+    if (!this.conversationFeed) return;
+    this.removeThinkingIndicator();
+
+    if (!this.currentAssistantBubble) {
+      const bubble = document.createElement("div");
+      bubble.className = "msg-bubble assistant-bubble";
+      bubble.style.cssText = "display: flex; gap: 10px; align-items: flex-start; margin-top: 4px;";
+      bubble.innerHTML = `
+        <span style="background: var(--primary, #3b82f6); color: white; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">P</span>
+        <div style="flex: 1; background: var(--surface); padding: 10px 14px; border-radius: 0 12px 12px 12px; border: 1px solid var(--border); line-height: 1.45; color: var(--ink);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span style="font-weight: 600; font-size: 0.78rem; color: var(--primary, #3b82f6);">Priya (DDU IT)</span>
+            <span class="assistant-lang-tag" style="font-size: 0.68rem; background: var(--border); padding: 1px 6px; border-radius: 4px; color: var(--muted);">${this.getLanguageLabel(this.languageSelect ? this.languageSelect.value : "gu-IN")}</span>
+          </div>
+          <span class="bubble-text" style="font-size: 0.9rem;"></span>
+        </div>
+      `;
+      this.conversationFeed.appendChild(bubble);
+      this.currentAssistantBubble = bubble;
+      this.currentAssistantTextSpan = bubble.querySelector(".bubble-text");
+    }
+
+    if (this.currentAssistantTextSpan) {
+      const existing = this.currentAssistantTextSpan.innerText.trim();
+      this.currentAssistantTextSpan.innerText = existing ? `${existing} ${sentence}` : sentence;
+    }
+    this.scrollConversationFeed();
+  }
+
+  finalizeAssistantBubble(fullText, lang, isHangup) {
+    this.removeThinkingIndicator();
+    if (!this.currentAssistantBubble && fullText && fullText.trim()) {
+      this.appendAssistantStreamingChunk(fullText);
+    }
+    if (this.currentAssistantBubble) {
+      if (fullText && this.currentAssistantTextSpan) {
+        this.currentAssistantTextSpan.innerText = fullText;
+      }
+      const tag = this.currentAssistantBubble.querySelector(".assistant-lang-tag");
+      if (tag && lang) {
+        tag.innerText = this.getLanguageLabel(lang);
+      }
+      if (isHangup) {
+        const hangupBadge = document.createElement("span");
+        hangupBadge.style.cssText = "display: inline-block; font-size: 0.7rem; background: rgba(239,68,68,0.1); color: #ef4444; padding: 2px 6px; border-radius: 4px; margin-top: 6px;";
+        hangupBadge.innerText = "📞 Call Concluded";
+        this.currentAssistantBubble.querySelector("div").appendChild(hangupBadge);
+      }
+    }
+    this.currentAssistantBubble = null;
+    this.currentAssistantTextSpan = null;
+    this.scrollConversationFeed();
+  }
+
+  scrollConversationFeed() {
+    if (this.conversationFeed) {
+      this.conversationFeed.scrollTop = this.conversationFeed.scrollHeight;
     }
   }
 
@@ -466,7 +727,7 @@ class VoiceAgentApp {
       if (calls.length === 0) {
         this.callHistoryBody.innerHTML = `
           <tr>
-            <td colspan="5" class="muted">No calls yet. Press Start voice call to begin.</td>
+            <td colspan="6" class="muted">No calls yet. Press Start voice call to begin.</td>
           </tr>
         `;
         return;
@@ -607,11 +868,43 @@ class VoiceAgentApp {
   // WebAudio Recording & Auto-VAD
   // =========================================================================
 
+  sendTextQuery(text) {
+    if (!text || !text.trim()) return;
+    const cleanText = text.trim();
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Ensure audio context is ready so synthesized response audio can play
+      if (!this.audioContext) {
+        try {
+          this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {}
+      }
+      if (this.audioContext && this.audioContext.state === "suspended") {
+        this.audioContext.resume();
+      }
+      this.updateStateText(`Asking: "${cleanText.length > 50 ? cleanText.slice(0, 50) + "…" : cleanText}"…`);
+      this.ws.send(
+        JSON.stringify({
+          event: "text_query",
+          text: cleanText,
+          language_code: this.languageSelect.value,
+        }),
+      );
+    } else {
+      this.updateStateText("⚠️ Voice gateway is reconnecting, please try again in a moment…");
+      this.initWebSocket();
+    }
+  }
+
   async toggleVoiceCall() {
     if (!this.isCallActive) {
+      this.startCallBtn.disabled = true;
+      this.startCallBtn.innerText = "Requesting mic…";
+      this.updateStateText("Requesting microphone permission from your browser…");
+
       try {
         await this.initAudioContext();
         this.isCallActive = true;
+        this.startCallBtn.disabled = false;
         this.callStartupGrace = Date.now() + 800; // Ignore mouse clicks & startup transients for 800ms
         this.startCallBtn.innerText = "End call";
         this.startCallBtn.classList.remove("btn-primary");
@@ -649,8 +942,19 @@ class VoiceAgentApp {
             this.callDuration.innerText = `${mins}:${secs}`;
         }, 1000);
       } catch (err) {
-        console.error("Mic access denied:", err);
-        alert("Microphone permission is required for live voice calls.");
+        console.error("Mic access error:", err);
+        this.isCallActive = false;
+        this.startCallBtn.disabled = false;
+        this.startCallBtn.innerText = "Start voice call";
+        this.startCallBtn.classList.add("btn-primary");
+
+        let userAdvice = "Microphone permission is required for live voice calls. Please allow microphone access in your browser address bar, or ask your question in the query box below.";
+        if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+          userAdvice = "No microphone hardware found. Please connect a microphone, or ask your question via the text box below.";
+        } else if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+          userAdvice = "Microphone access was blocked. Please click the tune/lock icon in your browser address bar to allow microphone access.";
+        }
+        this.updateStateText(`⚠️ ${userAdvice}`);
       }
     } else {
       // End call
@@ -678,9 +982,16 @@ class VoiceAgentApp {
 
   async initAudioContext() {
     if (!this.audioContext) {
-      this.audioContext = new (
-        window.AudioContext || window.webkitAudioContext
-      )({ sampleRate: 16000 });
+      try {
+        this.audioContext = new (
+          window.AudioContext || window.webkitAudioContext
+        )({ sampleRate: 16000 });
+      } catch (e) {
+        console.warn("Forced 16kHz context not supported, using default sampleRate:", e);
+        this.audioContext = new (
+          window.AudioContext || window.webkitAudioContext
+        )();
+      }
     }
     if (this.audioContext.state === "suspended") {
       await this.audioContext.resume();
@@ -746,19 +1057,20 @@ class VoiceAgentApp {
       // --- BARGE-IN: If customer speaks while agent is speaking, stop agent immediately ---
       if (this.isPlayingAudio) {
         const playbackElapsed = Date.now() - (this.playbackStartTime || 0);
-        const bargeInThreshold = Math.max(0.045, dynamicSpeechThreshold * 1.8);
+        const isInitialGreeting = (Date.now() - (this.callStartTime || 0)) < 3500;
+        // Higher threshold during initial greeting to prevent laptop speaker echo from self-barging
+        const bargeInThreshold = isInitialGreeting
+          ? Math.max(0.13, dynamicSpeechThreshold * 3.5)
+          : Math.max(0.065, dynamicSpeechThreshold * 2.2);
+        const requiredFrames = isInitialGreeting ? 5 : Math.max(3, this.requiredBargeInFrames || 3);
 
-        // 350ms playback start grace period to reject speaker turn-on sound
-        if (playbackElapsed > 350 && rms > bargeInThreshold) {
+        if (playbackElapsed > 500 && rms > bargeInThreshold) {
           this.consecutiveBargeInFrames++;
-          if (this.consecutiveBargeInFrames >= this.requiredBargeInFrames) {
+          if (this.consecutiveBargeInFrames >= requiredFrames) {
             console.log(
               `🛑 Caller interrupted while agent was speaking (RMS: ${rms.toFixed(3)} > ${bargeInThreshold.toFixed(3)}). Stopping agent playback.`,
             );
-            this.interruptAgent();
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-              this.ws.send(JSON.stringify({ event: "interrupt" }));
-            }
+            this.interruptAgent(true);
             this.isSpeechDetected = true;
             this.consecutiveSpeechFrames = this.requiredSpeechFrames;
             this.micOrb.classList.add("active");
@@ -1004,7 +1316,7 @@ class VoiceAgentApp {
     this.micOrb.classList.remove("active");
   }
 
-  interruptAgent() {
+  interruptAgent(broadcast = true) {
     this.playbackQueue = [];
     this.isPlayingAudio = false;
     this.nextAudioStartTime = 0;
@@ -1019,7 +1331,7 @@ class VoiceAgentApp {
     }
     this.micOrb.classList.remove("agent-speaking");
     this.interruptBtn.style.display = "none";
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (broadcast && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ event: "interrupt" }));
     }
     this.updateStateText("Stopped. Ask your next question whenever ready.");
@@ -1298,13 +1610,15 @@ class VoiceAgentApp {
         .map(
           (d) => `
         <tr>
-          <td><strong>${d.filename}</strong><br/><small class="muted">Official document</small></td>
-          <td>${d.upload_time}</td>
-          <td>${d.max_page} pages</td>
-          <td><span class="badge">${d.total_chunks} chunks</span></td>
+          <td><strong>${this.escapeHtml(d.filename || "")}</strong><br/><small class="muted">${this.escapeHtml(d.category || "Official document")}</small></td>
+          <td>${this.escapeHtml(d.upload_time || "—")}</td>
+          <td>${d.max_page || 1} pages</td>
+          <td><span class="badge">${d.total_chunks || 0} chunks</span></td>
           <td>
-            <button class="btn-inspect" onclick="window.voiceApp.inspectChunks('${d.doc_id}', '${d.filename}')">Inspect</button>
-            <button class="btn-delete" onclick="window.voiceApp.deleteDoc('${d.doc_id}')">Delete</button>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <button class="btn-inspect btn-sm" data-doc-id="${this.escapeHtml(d.doc_id || "")}" data-filename="${this.escapeHtml(d.filename || "")}" type="button" style="padding: 4px 10px; font-size: 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); cursor: pointer;">Inspect</button>
+              <button class="btn-delete btn-sm" data-doc-id="${this.escapeHtml(d.doc_id || "")}" data-filename="${this.escapeHtml(d.filename || "")}" type="button" style="padding: 4px 10px; font-size: 0.8rem; border-radius: 6px; border: 1px solid #fca5a5; background: #fee2e2; color: #b91c1c; cursor: pointer; font-weight: 500;">Delete</button>
+            </div>
           </td>
         </tr>
       `,
@@ -1315,55 +1629,116 @@ class VoiceAgentApp {
     }
   }
 
-  async inspectChunks(docId, filename) {
-    this.inspectorDocTitle.innerText = `${filename}`;
-    this.inspectorChunksList.innerHTML = `<div class="loading-cell">Loading chunk vectors...</div>`;
-    this.chunkInspectorModal.style.display = "flex";
-
-    try {
-      const res = await fetch(`/api/documents/${docId}/chunks`);
-      const data = await res.json();
-      const chunks = data.chunks || [];
-
-      if (chunks.length === 0) {
-        this.inspectorChunksList.innerHTML = `<div class="empty-state-text">No chunks found for this document.</div>`;
-        return;
-      }
-
-      this.inspectorChunksList.innerHTML = chunks
-        .map(
-          (c) => `
-        <div class="chunk-card">
-          <div class="chunk-header">
-            <span>Page ${c.page} &bull; Chunk #${c.chunk_index}</span>
-            <code>${c.chunk_id}</code>
-          </div>
-          <p>${c.text}</p>
-        </div>
-      `,
-        )
-        .join("");
-    } catch (e) {
-      console.error("Inspect chunks error:", e);
-      this.inspectorChunksList.innerHTML = `<div class="upload-feedback error">Failed to load chunks.</div>`;
+  openDeleteModal(docId, filename) {
+    if (!docId) return;
+    this.pendingDeleteDocId = docId;
+    this.pendingDeleteDocName = filename || docId;
+    if (this.deleteDocName) {
+      this.deleteDocName.innerText = `"${this.pendingDeleteDocName}"`;
+    }
+    if (this.deleteDocModal) {
+      this.deleteDocModal.style.display = "flex";
     }
   }
 
-  async deleteDoc(docId) {
-    if (
-      !confirm(
-        "Are you sure you want to delete this document from the vector store?",
-      )
-    )
-      return;
+  closeDeleteModal() {
+    this.pendingDeleteDocId = null;
+    this.pendingDeleteDocName = null;
+    if (this.deleteDocModal) {
+      this.deleteDocModal.style.display = "none";
+    }
+  }
+
+  async confirmDeleteDocument() {
+    if (!this.pendingDeleteDocId) return;
+    const docId = this.pendingDeleteDocId;
+    const filename = this.pendingDeleteDocName || docId;
+
+    if (this.confirmDeleteBtn) {
+      this.confirmDeleteBtn.disabled = true;
+      this.confirmDeleteBtn.innerText = "Deleting…";
+    }
+
     try {
-      const res = await fetch(`/api/documents/${docId}`, { method: "DELETE" });
-      if (res.ok) {
-        this.loadDocuments();
-        this.loadDatabaseData();
+      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        this.closeDeleteModal();
+        this.showUploadFeedback(`Deleted "${filename}" from vector memory.`, "success");
+        await this.loadDocuments();
+        await this.loadDatabaseData();
+        await this.checkSystemStatus();
+      } else {
+        alert(data.detail || data.message || "Failed to delete document from vector store.");
       }
     } catch (e) {
       console.error("Delete doc error:", e);
+      alert("Error deleting document: " + e.message);
+    } finally {
+      if (this.confirmDeleteBtn) {
+        this.confirmDeleteBtn.disabled = false;
+        this.confirmDeleteBtn.innerText = "Delete permanently";
+      }
+    }
+  }
+
+  deleteDoc(docId, filename) {
+    this.openDeleteModal(docId, filename);
+  }
+
+  async inspectChunks(docId, filename) {
+    if (!this.chunkInspectorModal) return;
+    this.chunkInspectorModal.style.display = "flex";
+    if (this.inspectorDocTitle) {
+      this.inspectorDocTitle.innerText = filename || `Document ${docId}`;
+    }
+    const subtitle = document.getElementById("inspectorDocSubtitle");
+    if (subtitle) {
+      subtitle.innerText = `Viewing all indexed chunks for ${filename || docId}`;
+    }
+    if (this.inspectorChunksList) {
+      this.inspectorChunksList.innerHTML = `<div class="muted" style="padding: 24px; text-align: center;">Loading indexed paragraphs & chunks…</div>`;
+    }
+
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}/chunks`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const chunks = data.chunks || [];
+
+      if (!this.inspectorChunksList) return;
+
+      if (chunks.length === 0) {
+        this.inspectorChunksList.innerHTML = `<div class="muted" style="padding: 24px; text-align: center;">No chunks found for this document.</div>`;
+        return;
+      }
+
+      this.inspectorChunksList.innerHTML = `
+        <div style="margin-bottom: 12px; font-size: 0.85rem; color: var(--muted); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+          <span>Total Chunks: <strong style="color: var(--ink);">${chunks.length}</strong></span>
+          <span class="mono" style="font-size: 0.75rem; background: var(--surface); padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border);">${this.escapeHtml(docId)}</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding-right: 4px;">
+          ${chunks
+            .map(
+              (c, idx) => `
+            <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-size: 0.84rem; line-height: 1.5; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 0.76rem; color: var(--muted); border-bottom: 1px dashed var(--border); padding-bottom: 4px;">
+                <span style="font-weight: 600; color: var(--primary, #3b82f6);">Chunk #${c.chunk_index || idx + 1} &bull; Page ${c.page || 1}</span>
+                <span class="mono" style="font-size: 0.72rem; opacity: 0.8;">${this.escapeHtml(c.chunk_id || "")}</span>
+              </div>
+              <div style="color: var(--ink); white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(c.text || "")}</div>
+            </div>
+          `
+            )
+            .join("")}
+        </div>
+      `;
+    } catch (err) {
+      console.error("[inspectChunks] error:", err);
+      if (this.inspectorChunksList) {
+        this.inspectorChunksList.innerHTML = `<div style="color: var(--red-tx); padding: 24px; text-align: center;">Failed to load document chunks: ${this.escapeHtml(err.message)}</div>`;
+      }
     }
   }
 

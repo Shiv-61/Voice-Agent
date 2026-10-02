@@ -124,6 +124,7 @@ async def test_websocket_stream():
             if isinstance(msg, str):
                 data = json.loads(msg)
                 event = data.get("event")
+                print(f"  [ws-event]: {event} -> {data}")
                 if event == "tool_executed":
                     tool_executed = True
                     print(f"  🛠️ Tool Executed: {data.get('tool')}({data.get('args')})")
@@ -131,7 +132,7 @@ async def test_websocket_stream():
                     hindi_done = True
                     print(f"✓ Hindi Tool Answer Synthesized: \"{data.get('full_text')}\"")
             elif isinstance(msg, bytes):
-                pass
+                print(f"  [ws-bytes]: {len(msg)} audio bytes")
 
         # D. Test Instant Hangup Detection
         farewell = "Thank you, goodbye!"

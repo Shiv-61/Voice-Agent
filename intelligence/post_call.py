@@ -9,22 +9,12 @@ import json
 import re
 import httpx
 import config
+from config.prompt_loader import get_post_call_prompt
 
-POST_CALL_SYSTEM_PROMPT = """\
-You are an expert College Admissions & Student Affairs CRM Auditor analyzing a concluded voice call transcript between a caller (student, parent, or applicant) and the DDU IT University AI Voice Assistant.
+def get_post_call_system_prompt() -> str:
+    """Returns the dynamically loaded post-call CRM audit prompt from config/prompts.yaml."""
+    return get_post_call_prompt()
 
-Your task is to analyze the conversation and extract structured college CRM intelligence.
-
-Return ONLY a raw, valid JSON object matching this schema:
-{
-  "intent": "<One of: 'Admission & Eligibility', 'Fee Structure & Scholarships', 'Hostel & Campus Rules', 'Student Records & Attendance', 'Placement Statistics', 'General College Inquiry'>",
-  "lead_status": "<One of: 'Hot Lead (Intends to Apply)', 'Prospective Applicant', 'Current Student', 'Parent Inquiry', 'Resolved / Info Provided'>",
-  "sentiment": "<One of: 'Positive', 'Neutral', 'Frustrated'>",
-  "summary": "<A 1-sentence concise factual summary of caller inquiry and college response>"
-}
-
-Do not include markdown code fences, backticks, or any conversational text. Output only raw JSON.
-"""
 
 def _heuristic_fallback(transcript_text: str) -> dict:
     """Fast deterministic fallback if LLM extraction fails."""
@@ -35,6 +25,8 @@ def _heuristic_fallback(transcript_text: str) -> dict:
         intent = "Fee Structure & Scholarships"
     elif any(k in lower for k in ["admission", "eligibility", "apply", "एडमिशन", "प्रवेश", "btech", "बीटेक"]):
         intent = "Admission & Eligibility"
+    elif any(k in lower for k in ["curriculum", "syllabus", "subject", "semester", "credit", "course", "पाठ्यक्रम", "વિષય"]):
+        intent = "College Curriculum & Academics"
     elif any(k in lower for k in ["placement", "package", "salary", "recruiter", "प्लेसमेंट"]):
         intent = "Placement Statistics"
     elif any(k in lower for k in ["attendance", "mark", "grade", "stu", "रिजल्ट", "हाजिरी"]):
@@ -47,16 +39,28 @@ def _heuristic_fallback(transcript_text: str) -> dict:
     # Lead Status
     if any(k in lower for k in ["apply", "admission", "एडमिशन", "form"]):
         lead_status = "Hot Lead (Intends to Apply)"
+        disposition = "Enrolled / Hot Lead"
+        follow_up = "Send B.Tech online application link via SMS"
     elif any(k in lower for k in ["stu", "student", "roll", "attendance"]):
         lead_status = "Current Student"
+        disposition = "Info Provided / Resolved"
+        follow_up = "None"
+    elif intent == "College Curriculum & Academics":
+        lead_status = "Prospective Applicant"
+        disposition = "Info Provided / Resolved"
+        follow_up = "Share academic syllabus link if requested"
     else:
         lead_status = "Prospective Applicant"
+        disposition = "Info Provided / Resolved"
+        follow_up = "None"
 
     # Sentiment
     if any(k in lower for k in ["thank", "धन्यवाद", "great", "good", "helpful", "आभार"]):
         sentiment = "Positive"
     elif any(k in lower for k in ["bad", "wrong", "angry", "bekaar", "gussa"]):
         sentiment = "Frustrated"
+        disposition = "Escalation Required"
+        follow_up = "Connect with department coordinator at 0268-2520502"
     else:
         sentiment = "Neutral"
 
@@ -64,8 +68,10 @@ def _heuristic_fallback(transcript_text: str) -> dict:
 
     return {
         "intent": intent,
+        "disposition": disposition,
         "lead_status": lead_status,
         "sentiment": sentiment,
+        "follow_up_action": follow_up,
         "summary": summary,
     }
 
@@ -98,33 +104,82 @@ async def analyze_and_record_call(call_id: str, history: list[dict], db) -> dict
     result = None
 
     # Call LLM for extraction
-    if config.LLM_PROVIDER == "openrouter" and config.OPENROUTER_API_KEY:
+    messages = [
+        {"role": "system", "content": get_post_call_system_prompt()},
+        {"role": "user", "content": f"Concluded Call Transcript:\n{transcript_text}"},
+    ]
+
+    req_url = None
+    req_headers = {}
+    req_payload = {}
+
+    if config.LLM_PROVIDER == "sarvam" and config.SARVAM_API_KEY:
+        req_url = config.SARVAM_CHAT_URL
+        req_headers = {
+            "api-subscription-key": config.SARVAM_API_KEY.strip(),
+            "Content-Type": "application/json",
+        }
+        sarvam_model = config.LLM_MODEL if config.LLM_MODEL and "sarvam" in config.LLM_MODEL else "sarvam-105b-conversations"
+        req_payload = {
+            "model": sarvam_model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 150,
+        }
+    elif config.LLM_PROVIDER == "groq" and config.GROQ_API_KEY:
+        req_url = config.GROQ_URL
+        req_headers = {
+            "Authorization": f"Bearer {config.GROQ_API_KEY.strip()}",
+            "Content-Type": "application/json",
+        }
+        groq_model = config.LLM_MODEL if config.LLM_MODEL and "llama" in config.LLM_MODEL.lower() else "llama-3.3-70b-versatile"
+        req_payload = {
+            "model": groq_model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 150,
+        }
+    elif config.LLM_PROVIDER == "openrouter" and config.OPENROUTER_API_KEY:
+        req_url = config.OPENROUTER_URL
+        req_headers = {
+            "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
+            "Content-Type": "application/json",
+        }
+        req_payload = {
+            "model": config.LLM_MODEL,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 150,
+        }
+    elif config.LLM_PROVIDER == "ollama":
+        req_url = config.OLLAMA_URL
+        req_headers = {"Content-Type": "application/json"}
+        req_payload = {
+            "model": config.LLM_MODEL or "qwen2.5:3b",
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 150},
+        }
+
+    if req_url:
         try:
-            headers = {
-                "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": config.LLM_MODEL,
-                "messages": [
-                    {"role": "system", "content": POST_CALL_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Concluded Call Transcript:\n{transcript_text}"},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 150,
-            }
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(config.OPENROUTER_URL, headers=headers, json=payload)
+                resp = await client.post(req_url, headers=req_headers, json=req_payload)
                 if resp.status_code == 200:
                     data = resp.json()
-                    content = data["choices"][0]["message"]["content"].strip()
-                    # Clean markdown codeblocks if present
-                    clean_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.MULTILINE).strip()
-                    parsed = json.loads(clean_json)
-                    if "intent" in parsed and "lead_status" in parsed:
-                        result = parsed
+                    content = ""
+                    if "choices" in data and data["choices"]:
+                        content = data["choices"][0].get("message", {}).get("content", "").strip()
+                    elif "message" in data:
+                        content = data["message"].get("content", "").strip()
+
+                    if content:
+                        clean_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.MULTILINE).strip()
+                        parsed = json.loads(clean_json)
+                        if "intent" in parsed and "lead_status" in parsed:
+                            result = parsed
         except Exception as e:
-            print(f"[intelligence] LLM extraction notice: {e}")
+            print(f"[intelligence] LLM extraction notice ({config.LLM_PROVIDER}): {e}")
 
     # Fallback heuristic if LLM unavailable or JSON parse failed
     if not result:
@@ -138,8 +193,10 @@ async def analyze_and_record_call(call_id: str, history: list[dict], db) -> dict
             result.get("lead_status", "Prospective Applicant"),
             result.get("sentiment", "Neutral"),
             result.get("summary", "Call completed."),
+            disposition=result.get("disposition", ""),            # Fix #16
+            follow_up_action=result.get("follow_up_action", ""),  # Fix #16
         )
-        print(f"📊 [intelligence] Call {call_id} analyzed: Intent='{result.get('intent')}', Lead='{result.get('lead_status')}'")
+        print(f"📊 [intelligence] Call {call_id} analyzed: Intent='{result.get('intent')}', Lead='{result.get('lead_status')}', Disposition='{result.get('disposition')}'")
     except Exception as err:
         print(f"[intelligence] Failed to persist analytics for {call_id}: {err}")
 

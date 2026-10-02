@@ -75,9 +75,9 @@
             <div class="lang-wrap">
               <label class="lang-label" for="languageSelect">Language</label>
               <select id="languageSelect" class="lang-select">
+                <option value="gu-IN" selected>Gujarati (ગુજરાતી)</option>
+                <option value="hi-IN">Hindi (हिंदी)</option>
                 <option value="en-IN">English</option>
-                <option value="hi-IN">Hindi</option>
-                <option value="gu-IN">Gujarati</option>
               </select>
             </div>
             <button
@@ -216,6 +216,41 @@
                 >
                   Stop
                 </button>
+              </div>
+
+              <!-- Instant Text Question Bar -->
+              <div class="chat-input-row" style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); display: flex; gap: 8px;">
+                <input
+                  type="text"
+                  id="textQueryInput"
+                  class="input"
+                  placeholder="Or type a question in Gujarati, Hindi, or English…"
+                  style="flex: 1; padding: 10px 14px; border-radius: var(--radius-sm, 8px); border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 0.92rem;"
+                  aria-label="Type your question"
+                />
+                <button id="sendTextQueryBtn" class="btn btn-primary" type="button" style="white-space: nowrap;">
+                  Ask
+                </button>
+              </div>
+
+              <!-- Live Conversation Transcript Stream -->
+              <div id="conversationStreamContainer" class="conversation-stream-container" style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span class="muted small" style="font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; font-size: 0.72rem;">Live Conversation</span>
+                  <button id="clearConversationBtn" type="button" class="link-btn small" style="font-size: 0.75rem; padding: 2px 6px; cursor: pointer; background: none; border: none; color: var(--muted); text-decoration: underline;">Clear</button>
+                </div>
+                <div id="conversationFeed" class="conversation-feed" style="max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; background: var(--surface-hover, rgba(0,0,0,0.02)); border-radius: var(--radius-sm, 10px); border: 1px solid var(--border); font-size: 0.88rem;">
+                  <div class="msg-bubble assistant-bubble" style="display: flex; gap: 10px; align-items: flex-start;">
+                    <span style="background: var(--primary, #3b82f6); color: white; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">P</span>
+                    <div style="flex: 1; background: var(--surface); padding: 10px 14px; border-radius: 0 12px 12px 12px; border: 1px solid var(--border); line-height: 1.45; color: var(--ink);">
+                      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                        <span style="font-weight: 600; font-size: 0.78rem; color: var(--primary, #3b82f6);">Priya (DDU IT)</span>
+                        <span class="lang-tag" style="font-size: 0.68rem; background: var(--border); padding: 1px 6px; border-radius: 4px; color: var(--muted);">ગુજરાતી</span>
+                      </div>
+                      <span class="bubble-text">નમસ્તે, હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા વાત કરું છું. હું તમારી શું મદદ કરી શકું? તમે ગુજરાતી, હિન્દી અથવા અંગ્રેજીમાં વાત કરી શકો છો.</span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
             </div>
@@ -693,6 +728,44 @@
       </div>
     </div>
 
+    <!-- Modal: delete document confirmation -->
+    <div
+      id="deleteDocModal"
+      class="overlay"
+      style="display: none"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Delete document"
+    >
+      <div class="modal" style="max-width: 440px">
+        <div class="card-head">
+          <div>
+            <h3 class="h2">Delete Document</h3>
+            <p class="muted small">Remove from vector memory</p>
+          </div>
+          <button id="closeDeleteModalBtn" class="icon-btn" aria-label="Close">
+            Close
+          </button>
+        </div>
+        <div style="margin: 16px 0">
+          <p style="font-size: 0.92rem; line-height: 1.45; color: var(--ink)">
+            Are you sure you want to permanently delete
+            <strong id="deleteDocName" style="color: var(--primary)"></strong>
+            from the knowledge base?
+          </p>
+          <p class="muted small" style="margin-top: 8px">
+            All vector chunks will be deleted. The assistant will no longer cite this document.
+          </p>
+        </div>
+        <div class="modal-actions" style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px">
+          <button id="cancelDeleteBtn" class="btn" type="button">Cancel</button>
+          <button id="confirmDeleteBtn" class="btn" type="button" style="background: #dc2626; color: white">
+            Delete permanently
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Modal: add student -->
     <div
       id="addStudentModal"
@@ -793,6 +866,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=4.0"></script>
+    <script src="/static/app.js?v=4.2"></script>
   </body>
 </html>

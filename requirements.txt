@@ -304,3 +304,5 @@ websockets==17.0.1
     #   voice-agent-project
 yarl==1.24.5
     # via aiohttp
+pyyaml>=6.0.0
+    # via voice-agent-project

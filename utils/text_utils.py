@@ -4,6 +4,53 @@ Text processing and conversational boundary utilities for real-time voice stream
 
 import re
 
+
+# ---------------------------------------------------------------------------
+# Shared language utilities (Fix #18 — eliminate TTS/STT duplication)
+# ---------------------------------------------------------------------------
+
+def normalize_lang(lang: str | None, default: str = "en-IN") -> str:
+    """Normalises a BCP-47 language code to the exact format Sarvam expects."""
+    if not lang or lang in ("unknown", ""):
+        return default
+    if lang in ("en", "en-IN"):
+        return "en-IN"
+    if lang in ("hi", "hi-IN"):
+        return "hi-IN"
+    if lang in ("gu", "gu-IN"):
+        return "gu-IN"
+    if len(lang) == 2:
+        return f"{lang}-IN"
+    return lang
+
+
+# Multilingual error/notice messages (Fix #22)
+_ERRORS: dict[str, dict[str, str]] = {
+    "stt_error": {
+        "gu-IN": "માફ કરશો, હું તમારો અવાજ સ્પષ્ટ ન સાંભળ્યો. કૃપા કરીને ફરીથી બોલો.",
+        "hi-IN": "माफ़ कीजिए, आपकी आवाज़ स्पष्ट नहीं सुनाई दी। कृपया दोबारा बोलें।",
+        "en-IN": "Sorry, I could not hear that clearly. Please speak again.",
+    },
+    "tts_error": {
+        "gu-IN": "માફ કરશો, ઓડિઓ સ્ટ્રીમ કરવામાં સમસ્યા થઈ. ફરીથી પ્રયાસ કરો.",
+        "hi-IN": "माफ़ कीजिए, ऑडियो में समस्या आई। कृपया दोबारा प्रयास करें।",
+        "en-IN": "Sorry, there was an audio error. Please try again.",
+    },
+    "system_error": {
+        "gu-IN": "માફ કરશો, સિસ્ટમ સાથે કનેક્ટ થવામાં મુશ્કેલી. થોડી વાર પછી પ્રયાસ કરો.",
+        "hi-IN": "माफ़ कीजिए, सिस्टम से कनेक्ट करने में समस्या। थोड़ी देर बाद प्रयास करें।",
+        "en-IN": "Sorry, trouble connecting to the university system. Please try again shortly.",
+    },
+}
+
+
+def get_error_message(key: str, lang: str | None = None) -> str:
+    """Returns a caller-language-appropriate error message."""
+    norm = normalize_lang(lang, "en-IN")
+    bucket = _ERRORS.get(key, _ERRORS["system_error"])
+    return bucket.get(norm, bucket.get("en-IN", ""))
+
+
 # Common honorifics and technical abbreviations across academic voice dialogues
 ABBREVIATIONS = {
     "dr", "prof", "mr", "mrs", "ms", "sr", "jr", "vs",
@@ -112,9 +159,43 @@ def clean_speech_text(text: str) -> str:
     # Remove third-person LLM meta-reasoning prefixes (e.g. "The user is asking...", "I should answer...")
     cleaned = re.sub(r"^(?:The user is (?:asking|inquiring|looking|requesting|wondering)[^.]*\.\s*)+", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^(?:I should (?:answer|provide|tell|respond)[^.]*\.\s*)+", "", cleaned, flags=re.IGNORECASE)
+    # Strip spoken preambles like "Sure, let me check that for you" or "Let me check"
+    cleaned = re.sub(
+        r"^(?:(?:sure|okay|ok|yes),?\s*)?(?:let me check(?:\s+that)?(?:\s+for you)?|i will check(?:\s+that)?(?:\s+for you)?|just a moment(?:\s+please)?)[.,!]*\s*",
+        "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"^(?:(?:હા|જી|હાજી),?\s*)?(?:હું હમણાં જ (?:વિગતો જોઈ લઉં છું|ચેક કરું છું)|તપાસીને જણાવું છું)[.,!।]*\s*",
+        "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"^(?:(?:जी|हाँ|हां),?\s*)?(?:मैं अभी (?:चेक करके बताती हूँ|देखती हूँ|जाँच करती हूँ)|पता करके बताती हूँ)[.,!।]*\s*",
+        "", cleaned, flags=re.IGNORECASE
+    )
     # Normalize excessive whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+STANDALONE_FILLER_PATTERNS = [
+    r"^(?:sure,?\s*)?let me check(?:\s+that)?(?:\s+for you)?[.!?]*$",
+    r"^(?:sure,?\s*)?let me look(?:\s+that)?(?:\s+up)?[.!?]*$",
+    r"^(?:sure,?\s*)?just a moment(?:\s+please)?[.!?]*$",
+    r"^(?:sure,?\s*)?i will check(?:\s+that)?(?:\s+for you)?[.!?]*$",
+    r"^(?:હા,?\s*)?હું હમણાં જ વિગતો જોઈ લઉં છું[.!?।]*$",
+    r"^(?:જી,?\s*)?હું હમણાં જ (?:વિગતો જોઈ લઉં છું|ચેક કરું છું)[.!?।]*$",
+    r"^(?:जी,?\s*)?मैं अभी चेक करके बताती हूँ[.!?।]*$",
+]
+COMPILED_FILLER_REGEX = [re.compile(p, re.IGNORECASE) for p in STANDALONE_FILLER_PATTERNS]
+
+
+def is_filler_phrase(text: str) -> bool:
+    """Detects standalone filler / preamble phrases that shouldn't be spoken."""
+    if not text:
+        return False
+    clean = text.strip()
+    return any(r.match(clean) for r in COMPILED_FILLER_REGEX)
+
 
 
 PROMPT_LEAK_PATTERNS = [
