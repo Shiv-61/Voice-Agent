@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import re
+import time
 import traceback
 import uuid
 from typing import Any
@@ -27,7 +28,7 @@ from stt import STT
 from tts import TTS
 from utils.filler_manager import FillerManager
 
-from utils import split_ready_sentences, is_hangup_intent, clean_speech_text, is_prompt_leak, is_noise_hallucination
+from utils import split_ready_sentences, is_hangup_intent, clean_speech_text, is_prompt_leak, is_noise_hallucination, is_filler_phrase
 
 
 # Initialize application
@@ -52,6 +53,23 @@ static_dir = os.path.join(os.path.dirname(__file__), "static")
 os.makedirs(static_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+# Shared STT & TTS instances (lazy initialized to save memory and avoid concurrent leak)
+_shared_tts = None
+_shared_stt = None
+_active_ws_connections: dict[str, int] = {}
+
+def get_shared_tts() -> TTS:
+    global _shared_tts
+    if _shared_tts is None:
+        _shared_tts = TTS()
+    return _shared_tts
+
+def get_shared_stt() -> STT:
+    global _shared_stt
+    if _shared_stt is None:
+        _shared_stt = STT()
+    return _shared_stt
+
 
 @app.get("/healthz")
 async def health_check():
@@ -66,6 +84,22 @@ async def get_index():
         return FileResponse(index_file)
     return JSONResponse({"message": "Voice Agent API is active. Static UI not yet deployed."})
 
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Fix #23: Serve favicon to eliminate 404 on every browser page load."""
+    favicon_path = os.path.join(static_dir, "favicon.ico")
+    if os.path.exists(favicon_path):
+        return FileResponse(favicon_path, media_type="image/x-icon")
+    # Return a minimal 1x1 transparent ICO so browsers don't log 404
+    ico_bytes = (
+        b"\x00\x00\x01\x00\x01\x00\x01\x01\x00\x00\x01\x00\x18\x00"
+        b"\x30\x00\x00\x00\x16\x00\x00\x00\x28\x00\x00\x00\x01\x00"
+        b"\x00\x00\x02\x00\x00\x00\x01\x00\x18\x00\x00\x00\x00\x00"
+        b"\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x00\x4e\x6c\xe8\x00\x00\x00"
+    )
+    return Response(content=ico_bytes, media_type="image/x-icon")
 
 
 # -----------------------------------------------------------------------------
@@ -304,15 +338,45 @@ async def get_call_history(limit: int = 50):
 class WebVoiceSession:
     def __init__(self, ws: WebSocket):
         self.ws = ws
-        self.stt = STT()
+        self.send_lock = asyncio.Lock()
+        self.pending_synth_tasks: set[asyncio.Task] = set()
+        self.stt = get_shared_stt()
         self.llm = LLM(db=db, rag=rag)
-        self.tts = TTS()
+        self.tts = get_shared_tts()
         self.filler_mgr = FillerManager(tts=self.tts)
         self.language_code = config.DEFAULT_LANGUAGE
+        self.last_stt_lang = config.DEFAULT_LANGUAGE   # Fix #5: track per-turn STT hint
         self.active_task = None
         self.call_id = None
         self.caller_number = "Web"
+        self.last_filler_time = 0.0
+        self._turn_buffer: list[dict] = []  # Fix #12: buffer turns, bulk-flush at end
         self._hook_llm_tools()
+
+    async def send_json_safe(self, data: dict):
+        """Thread-safe and concurrency-safe JSON transmission over WebSocket."""
+        async with self.send_lock:
+            try:
+                await self.ws.send_json(data)
+            except Exception as e:
+                print(f"[web-ws] send_json_safe notice: {e}")
+
+    async def send_bytes_safe(self, data: bytes):
+        """Thread-safe and concurrency-safe binary audio transmission over WebSocket."""
+        async with self.send_lock:
+            try:
+                await self.ws.send_bytes(data)
+            except Exception as e:
+                print(f"[web-ws] send_bytes_safe notice: {e}")
+
+    def cancel_active_pipeline(self):
+        """Cancels inflight transcription, LLM, and synthesis worker tasks immediately."""
+        if self.active_task and not self.active_task.done():
+            self.active_task.cancel()
+        for t in list(self.pending_synth_tasks):
+            if not t.done():
+                t.cancel()
+        self.pending_synth_tasks.clear()
 
     def ensure_call_log(self):
         """Opens a call log entry if the session doesn't have one yet."""
@@ -329,6 +393,10 @@ class WebVoiceSession:
         """Closes the session's open call log entry and runs async post-call CRM extraction."""
         if self.call_id:
             cid = self.call_id
+            # Fix #12: single bulk flush instead of N per-turn writes
+            if self._turn_buffer:
+                db.flush_queries_bulk(cid, self._turn_buffer)
+                self._turn_buffer = []
             db.log_call_end(cid)
             self.call_id = None
             try:
@@ -340,21 +408,29 @@ class WebVoiceSession:
     def _hook_llm_tools(self):
         """Wraps LLM tool execution to broadcast live tool events to the frontend."""
         original_execute = self.llm._execute_tool
-        loop = asyncio.get_event_loop()
 
         def wrapped_execute(tool_name: str, kwargs: dict) -> str:
-            # Broadcast tool execution event to client thread-safely
+            # Broadcast tool execution event to client thread-safely via running loop
             try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                try:
+                    loop = asyncio.get_event_loop()
+                except Exception:
+                    loop = None
+
+            if loop and loop.is_running():
                 preview = f"{tool_name}({', '.join(f'{k}={v}' for k, v in kwargs.items())})"
-                coro = self.ws.send_json({
+                coro = self.send_json_safe({
                     "event": "tool_executed",
                     "tool": tool_name,
                     "args": kwargs,
                     "preview": preview,
                 })
-                asyncio.run_coroutine_threadsafe(coro, loop)
-            except Exception as err:
-                print(f"[web-ws] Error sending tool event: {err}")
+                try:
+                    asyncio.run_coroutine_threadsafe(coro, loop)
+                except Exception as err:
+                    print(f"[web-ws] Error sending tool event: {err}")
             return original_execute(tool_name, kwargs)
 
         self.llm._execute_tool = wrapped_execute
@@ -364,10 +440,13 @@ class WebVoiceSession:
         if not user_text.strip():
             return
 
-        self.language_code = detected_lang
+        # Dynamically determine the active turn language for TTS and UI synchronization
+        turn_lang, bcp47, _ = self.llm.detect_turn_language(user_text, self.language_code)
+        self.language_code = bcp47
+        active_lang = bcp47
 
         # 1. Send Thinking Event
-        await self.ws.send_json({"event": "agent_thinking"})
+        await self.send_json_safe({"event": "agent_thinking"})
 
         # Check call hangup intent via zero-latency evaluator
         is_hangup = is_hangup_intent(user_text)
@@ -386,37 +465,43 @@ class WebVoiceSession:
                     ready_sentences, buffer = split_ready_sentences(buffer)
 
                     for sentence in ready_sentences:
-                        s = sentence.strip()
+                        s = clean_speech_text(sentence.strip())
                         if s:
-                            if is_prompt_leak(s):
-                                print(f"🛑 [web-ws] Suppressed prompt leak from TTS: {s}")
+                            if is_prompt_leak(s) or is_filler_phrase(s):
+                                print(f"🛑 [web-ws] Suppressed prompt leak/filler from TTS: {s}")
                                 continue
-                            await self.ws.send_json({
+                            await self.send_json_safe({
                                 "event": "agent_partial_text",
                                 "text": s,
                             })
-                            # Schedule synthesis in worker threadpool immediately
+                            # Schedule synthesis in worker threadpool immediately using active turn language
                             synth_task = asyncio.create_task(
-                                asyncio.to_thread(self.tts.synthesize, s, detected_lang)
+                                asyncio.to_thread(self.tts.synthesize, s, active_lang)
                             )
+                            self.pending_synth_tasks.add(synth_task)
+                            synth_task.add_done_callback(self.pending_synth_tasks.discard)
                             await sentence_queue.put(synth_task)
 
                 # Process buffer remainder
-                if buffer.strip():
-                    rem = buffer.strip()
-                    if not is_prompt_leak(rem):
-                        await self.ws.send_json({
+                rem = clean_speech_text(buffer.strip())
+                if rem:
+                    if not (is_prompt_leak(rem) or is_filler_phrase(rem)):
+                        await self.send_json_safe({
                             "event": "agent_partial_text",
                             "text": rem,
                         })
                         synth_task = asyncio.create_task(
-                            asyncio.to_thread(self.tts.synthesize, rem, detected_lang)
+                            asyncio.to_thread(self.tts.synthesize, rem, active_lang)
                         )
+                        self.pending_synth_tasks.add(synth_task)
+                        synth_task.add_done_callback(self.pending_synth_tasks.discard)
                         await sentence_queue.put(synth_task)
             finally:
                 await sentence_queue.put(None)  # Sentinel
 
+        is_first_chunk = True  # kept for filler logic only
         async def tts_consumer():
+            nonlocal is_first_chunk
             while True:
                 task = await sentence_queue.get()
                 if task is None:
@@ -424,18 +509,20 @@ class WebVoiceSession:
                 try:
                     audio_chunk = await task
                     if audio_chunk:
-                        await self.ws.send_bytes(audio_chunk)
+                        # Fix #6: removed dead is_first_chunk/last_filler_time guard
+                        # (ENABLE_ACOUSTIC_FILLER is False so filler is never sent)
+                        await self.send_bytes_safe(audio_chunk)
                 except Exception as err:
                     print(f"[web-ws] Pipelined TTS streaming error: {err}")
 
         try:
             await asyncio.gather(llm_producer(), tts_consumer())
 
-            # Signal completion with call_hangup flag
-            await self.ws.send_json({
+            # Signal completion with call_hangup flag and active turn language
+            await self.send_json_safe({
                 "event": "agent_done",
                 "full_text": full_agent_reply.strip(),
-                "language": detected_lang,
+                "language": active_lang,
                 "call_hangup": is_hangup,
             })
 
@@ -443,13 +530,17 @@ class WebVoiceSession:
             if is_hangup:
                 print("📞 [web-ws] Call hangup condition met. Initiating disconnect...")
                 await asyncio.sleep(1.0)  # Allow final farewell speech chunk to play
-                await self.ws.send_json({
+                await self.send_json_safe({
                     "event": "call_ended",
                     "call_hangup": True,
                     "reason": "Caller concluded conversation",
                 })
         except asyncio.CancelledError:
             print("🛑 [web-ws] Active query pipeline cancelled due to user barge-in.")
+            for t in list(self.pending_synth_tasks):
+                if not t.done():
+                    t.cancel()
+            self.pending_synth_tasks.clear()
             raise
 
     async def process_audio_payload(self, audio_bytes: bytes):
@@ -462,98 +553,149 @@ class WebVoiceSession:
         audio_dur = 0
         audio_rms = 0
         try:
-            import io, wave
+            import io, wave, math
             import numpy as np
-            with io.BytesIO(audio_bytes) as bio, wave.open(bio, "rb") as wf:
-                framerate = wf.getframerate()
-                channels = wf.getnchannels()
-                n_frames = wf.getnframes()
-                audio_dur = n_frames / framerate if framerate else 0
-                raw_frames = wf.readframes(n_frames)
-                pcm = np.frombuffer(raw_frames, dtype=np.int16)
-                if len(pcm) > 0:
-                    audio_rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
-                print(f"🎙️ [web-ws] Received audio: {len(audio_bytes)} bytes, {audio_dur:.2f}s, {framerate}Hz, RMS: {audio_rms:.4f}")
+            try:
+                with io.BytesIO(audio_bytes) as bio, wave.open(bio, "rb") as wf:
+                    framerate = wf.getframerate()
+                    channels = wf.getnchannels()
+                    n_frames = wf.getnframes()
+                    audio_dur = n_frames / framerate if framerate else 0
+                    raw_frames = wf.readframes(n_frames)
+                    pcm = np.frombuffer(raw_frames, dtype=np.int16)
+            except (wave.Error, Exception):
+                # Fallback: treat as raw 16kHz mono PCM
+                framerate = 16000
+                channels = 1
+                pcm = np.frombuffer(audio_bytes, dtype=np.int16)
+                audio_dur = len(pcm) / 16000.0
 
-                # Server-side acoustic noise gate to reject ambient room hum, breathing, and mic thuds
-                if audio_dur < 0.40 or audio_rms < 0.016:
-                    print(f"🔇 [web-ws] Rejected ambient noise snippet: {audio_dur:.2f}s, RMS: {audio_rms:.4f}")
-                    await self.ws.send_json({
-                        "event": "empty_transcript",
-                        "rms": audio_rms,
-                        "duration": audio_dur,
-                        "had_filler": False,
-                    })
-                    return
+            if len(pcm) > 0:
+                audio_rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
+            print(f"🎙️ [web-ws] Received audio: {len(audio_bytes)} bytes, {audio_dur:.2f}s, {framerate}Hz, RMS: {audio_rms:.4f}")
 
-                if framerate != 16000 and framerate > 0:
-                    print(f"🎙️ [web-ws] Normalizing audio from {framerate}Hz ({channels}ch) to 16000Hz mono...")
-                    if channels > 1:
-                        pcm = pcm[::channels]
+            # Server-side acoustic noise gate to reject ambient room hum, breathing, and mic thuds
+            if audio_dur < 0.30 or audio_rms < 0.010:
+                print(f"🔇 [web-ws] Rejected ambient noise snippet: {audio_dur:.2f}s, RMS: {audio_rms:.4f}")
+                await self.send_json_safe({
+                    "event": "empty_transcript",
+                    "rms": audio_rms,
+                    "duration": audio_dur,
+                    "had_filler": False,
+                })
+                return
+
+            if framerate != 16000 and framerate > 0:
+                print(f"🎙️ [web-ws] Normalizing audio from {framerate}Hz ({channels}ch) to 16000Hz mono with polyphase anti-aliasing...")
+                if channels > 1:
+                    pcm = pcm[::channels]
+                try:
+                    from scipy.signal import resample_poly
+                    gcd = math.gcd(16000, framerate)
+                    up = 16000 // gcd
+                    down = framerate // gcd
+                    resampled = resample_poly(pcm, up, down).astype(np.int16)
+                except Exception as re_err:
+                    print(f"⚠️ [web-ws] Scipy resample fallback notice: {re_err}")
                     new_len = int(len(pcm) * 16000 / framerate)
                     indices = np.linspace(0, len(pcm) - 1, new_len)
                     resampled = np.interp(indices, np.arange(len(pcm)), pcm).astype(np.int16)
-                    out_bio = io.BytesIO()
-                    with wave.open(out_bio, "wb") as out_wf:
-                        out_wf.setnchannels(1)
-                        out_wf.setsampwidth(2)
-                        out_wf.setframerate(16000)
-                        out_wf.writeframes(resampled.tobytes())
-                    audio_bytes = out_bio.getvalue()
+
+                out_bio = io.BytesIO()
+                with wave.open(out_bio, "wb") as out_wf:
+                    out_wf.setnchannels(1)
+                    out_wf.setsampwidth(2)
+                    out_wf.setframerate(16000)
+                    out_wf.writeframes(resampled.tobytes())
+                audio_bytes = out_bio.getvalue()
         except Exception as e:
             print(f"⚠️ [web-ws] Audio normalization notice: {e}")
 
         filler_sent = False
-        if audio_dur >= 0.8 and audio_rms >= 0.024:
+        if getattr(config, "ENABLE_ACOUSTIC_FILLER", False) and audio_dur >= 0.8 and audio_rms >= 0.024:
             filler_audio = self.filler_mgr.get_filler(self.language_code)
             if filler_audio:
                 try:
-                    await self.ws.send_json({
+                    await self.send_json_safe({
                         "event": "agent_filler",
                         "language": self.language_code,
                     })
-                    await self.ws.send_bytes(filler_audio)
+                    await self.send_bytes_safe(filler_audio)
                     filler_sent = True
+                    self.last_filler_time = time.time()
                     print(f"⚡ [web-ws] Streamed instant acoustic filler ({self.language_code}) within 150ms.")
                 except Exception as fe:
                     print(f"[web-ws] Notice sending filler audio: {fe}")
 
+        # Fix #5: use last known STT turn language as hint for better accuracy
         try:
             transcript, detected_lang = await asyncio.to_thread(
-                self.stt.transcribe, audio_bytes, self.language_code
+                self.stt.transcribe, audio_bytes, self.last_stt_lang
             )
 
         except Exception as e:
+            from utils import get_error_message  # Fix #22
             err_str = str(e)
             if "invalid_api_key" in err_str.lower() or "403" in err_str or "forbidden" in err_str.lower():
-                user_msg = "⚠️ Speech-to-Text Notice: Sarvam API key is invalid or expired. You can still type queries directly in the chat bar below!"
+                user_msg = get_error_message("stt_error", self.last_stt_lang)
             else:
-                user_msg = f"Speech-to-text error: {err_str}"
+                user_msg = get_error_message("stt_error", self.last_stt_lang)
             print(f"[web-ws] STT error: {e}")
-            await self.ws.send_json({"event": "error", "message": user_msg})
+            await self.send_json_safe({"event": "error", "message": user_msg})
             return
 
         if not transcript.strip() or is_noise_hallucination(transcript, audio_dur, audio_rms):
             print(f"🔇 [web-ws] Filtered noise/silence artifact: \"{transcript.strip()}\" ({audio_dur:.2f}s, RMS: {audio_rms:.4f})")
-            await self.ws.send_json({
+            await self.send_json_safe({
                 "event": "empty_transcript",
                 "rms": audio_rms,
                 "duration": audio_dur,
                 "had_filler": filler_sent,
             })
+            if filler_sent:
+                # Politely follow up so caller is never stranded after filler
+                clarification = {
+                    "hi-IN": "माफ़ कीजिए, मुझे आपकी आवाज़ साफ़ नहीं आई। क्या आप दोबारा कह सकते हैं?",
+                    "gu-IN": "માફ કરશો, મને તમારો અવાજ સ્પષ્ટ ન સંભળાયો. કૃપા કરીને ફરીથી કહેશો?",
+                    "en-IN": "I'm sorry, I couldn't hear that clearly. Could you please repeat your question?",
+                }.get(self.language_code, "I'm sorry, I couldn't hear that clearly. Could you please repeat your question?")
+                await self.send_json_safe({
+                    "event": "agent_partial_text",
+                    "text": clarification,
+                })
+                await self.send_json_safe({
+                    "event": "agent_done",
+                    "full_text": clarification,
+                    "language": self.language_code,
+                    "call_hangup": False,
+                })
+                try:
+                    followup_audio = await asyncio.to_thread(self.tts.synthesize, clarification, self.language_code)
+                    if followup_audio:
+                        await self.send_bytes_safe(followup_audio)
+                except Exception as ce:
+                    print(f"[web-ws] Clarification audio notice: {ce}")
             return
 
         print(f"🎙️ [web-ws] User [{detected_lang}]: {transcript}")
 
-
-        await self.ws.send_json({
+        await self.send_json_safe({
             "event": "user_transcript",
             "text": transcript,
             "language": detected_lang,
         })
 
         self.ensure_call_log()
-        db.log_call_query(self.call_id, transcript)
+        # Fix #12: buffer to turn list (bulk-flushed at end_call_log)
+        import datetime as _dt
+        self._turn_buffer.append({
+            "text": transcript,
+            "lang": detected_lang,
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "role": "user",
+        })
+        # Fix #5: update STT hint so next audio chunk is primed with caller's detected language
+        self.last_stt_lang = detected_lang or self.last_stt_lang
 
         await self.process_user_query(transcript, detected_lang)
 
@@ -562,7 +704,12 @@ class WebVoiceSession:
 async def websocket_call_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_host = websocket.client.host if websocket.client else "unknown"
-    print(f"📞 [web-ws] Client connected from {client_host}")
+    if _active_ws_connections.get(client_host, 0) >= 8:
+        print(f"⚠️ [web-ws] Connection rejected: Rate limit reached for host {client_host}")
+        await websocket.close(code=1008)
+        return
+    _active_ws_connections[client_host] = _active_ws_connections.get(client_host, 0) + 1
+    print(f"📞 [web-ws] Client connected from {client_host} (active for host: {_active_ws_connections[client_host]})")
 
     session = WebVoiceSession(websocket)
     try:
@@ -570,8 +717,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
             message = await websocket.receive()
             if "bytes" in message and message["bytes"]:
                 audio_bytes = message["bytes"]
-                if session.active_task and not session.active_task.done():
-                    session.active_task.cancel()
+                session.cancel_active_pipeline()
                 session.active_task = asyncio.create_task(session.process_audio_payload(audio_bytes))
 
             elif "text" in message and message["text"]:
@@ -580,73 +726,91 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     event = payload.get("event")
                     if event == "start":
                         session.language_code = payload.get("language_code", config.DEFAULT_LANGUAGE)
-                        await websocket.send_json({
+                        is_reconnect = payload.get("is_reconnect", False)
+                        await session.send_json_safe({
                             "event": "session_started",
                             "language": session.language_code,
+                            "reconnected": is_reconnect,
                         })
-                        # Immediately greet caller with welcome message and audio
-                        await websocket.send_json({
-                            "event": "agent_partial_text",
-                            "text": WELCOME_MESSAGE,
-                        })
-                        await websocket.send_json({
-                            "event": "agent_done",
-                            "full_text": WELCOME_MESSAGE,
-                            "language": "hi-IN",
-                            "call_hangup": False,
-                        })
-                        try:
-                            welcome_audio = await asyncio.to_thread(session.tts.synthesize, WELCOME_MESSAGE, language_code="hi-IN")
-                            if welcome_audio:
-                                await websocket.send_bytes(welcome_audio)
-                        except Exception as e:
-                            print(f"[web-ws] Notice sending welcome audio: {e}")
                     elif event == "call_started":
                         # Frontend signals mic-on: open a call log entry
                         session.caller_number = payload.get("caller_number", "Web") or "Web"
                         session.language_code = payload.get("language_code", session.language_code)
                         session.end_call_log()
+                        # Reset LLM conversation history for the fresh call
+                        session.llm.history = [{"role": "assistant", "content": WELCOME_MESSAGE}]
                         session.ensure_call_log()
-                        await websocket.send_json({
+                        await session.send_json_safe({
                             "event": "call_started_ack",
                             "call_id": session.call_id,
                         })
+                        # Greet caller with spoken welcome greeting when call is actively started
+                        await session.send_json_safe({
+                            "event": "agent_partial_text",
+                            "text": WELCOME_MESSAGE,
+                        })
+                        await session.send_json_safe({
+                            "event": "agent_done",
+                            "full_text": WELCOME_MESSAGE,
+                            "language": session.language_code or "gu-IN",
+                            "call_hangup": False,
+                        })
+                        try:
+                            cached_greeting_path = os.path.join(static_dir, "welcome_greeting.wav")
+                            welcome_audio = None
+                            if os.path.exists(cached_greeting_path):
+                                with open(cached_greeting_path, "rb") as wf:
+                                    welcome_audio = wf.read()
+                            if not welcome_audio:
+                                welcome_audio = await asyncio.to_thread(
+                                    session.tts.synthesize, WELCOME_MESSAGE, language_code=session.language_code or "gu-IN"
+                                )
+                            if welcome_audio:
+                                await session.send_bytes_safe(welcome_audio)
+                        except Exception as e:
+                            print(f"[web-ws] Notice sending welcome audio on call_started: {e}")
                     elif event == "call_ended":
                         # Frontend signals mic-off: close the call log entry
                         session.end_call_log()
-                        await websocket.send_json({"event": "call_ended_ack"})
+                        await session.send_json_safe({"event": "call_ended_ack"})
                     elif event == "text_query":
                         # Dual text chat input support
                         text = payload.get("text", "")
                         lang = payload.get("language_code", session.language_code)
-                        await websocket.send_json({
+                        await session.send_json_safe({
                             "event": "user_transcript",
                             "text": text,
                             "language": lang,
                         })
                         session.ensure_call_log()
                         db.log_call_query(session.call_id, text)
-                        if session.active_task and not session.active_task.done():
-                            session.active_task.cancel()
+                        session.cancel_active_pipeline()
                         session.active_task = asyncio.create_task(session.process_user_query(text, lang))
 
                     elif event == "interrupt":
                         # Client signal to interrupt playback and current processing
                         print(f"🛑 [web-ws] Barge-in interruption from {client_host}")
-                        if session.active_task and not session.active_task.done():
-                            session.active_task.cancel()
-                        await websocket.send_json({"event": "interrupted"})
+                        session.cancel_active_pipeline()
+                        await session.send_json_safe({"event": "interrupted"})
 
                     elif event == "ping":
-                        await websocket.send_json({"event": "pong"})
+                        await session.send_json_safe({"event": "pong"})
                 except Exception as e:
                     print(f"[web-ws] JSON message parse error: {e}")
 
     except WebSocketDisconnect:
         print(f"👋 [web-ws] Client disconnected ({client_host})")
     except Exception as e:
-        print(f"⚠️ [web-ws] Connection error: {e}")
+        if "disconnect message has been received" in str(e).lower() or "closed" in str(e).lower():
+            print(f"👋 [web-ws] Client session ended cleanly ({client_host})")
+        else:
+            print(f"⚠️ [web-ws] Connection error: {e}")
     finally:
+        new_count = max(0, _active_ws_connections.get(client_host, 1) - 1)
+        if new_count == 0:
+            _active_ws_connections.pop(client_host, None)  # Fix #14: prevent unbounded dict growth
+        else:
+            _active_ws_connections[client_host] = new_count
         session.end_call_log()
 
 
@@ -661,7 +825,8 @@ async def vobiz_answer_endpoint(request: Request):
     Returns XML instruction telling Vobiz to connect a bidirectional WebSocket stream.
     """
     host = request.headers.get("host", f"localhost:{config.WS_PORT}")
-    proto = "wss" if "render.com" in host or request.url.scheme == "https" else "ws"
+    fwd_proto = request.headers.get("x-forwarded-proto", "").lower()
+    proto = "wss" if fwd_proto == "https" or "render.com" in host or request.url.scheme == "https" else "ws"
     ws_url = f"{proto}://{host}/ws/vobiz"
     xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -678,22 +843,24 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     Bidirectional WebSocket endpoint for Vobiz Voice AI Telephony.
     Streams 16kHz linear PCM audio back and forth, supporting:
     - Welcome message on call connection
-    - Continuous speech recognition & 2s silence commit
+    - Continuous speech recognition & 0.55s silence commit
     - Full-duplex barge-in (flushing playback queue via clearAudio)
     - Sarvam STT & TTS (female voice: Priya)
     - Automatic call disconnection on hangup detection
+    - Real-time CRM logging to PostgreSQL / SQLite
     """
     import asyncio, io, wave, numpy as np
     await websocket.accept()
     client_host = websocket.client.host if websocket.client else "unknown"
     print(f"📞 [vobiz-ws] Telephony call connected from {client_host}")
 
-    stt = STT()
-    llm = LLM()
-    tts = TTS()
+    stt = get_shared_stt()
+    llm = LLM(db=db, rag=rag)
+    tts = get_shared_tts()
+    # Fix #8: asyncio.Queue ensures sequential TTS playback (no interleaving)
+    # Fix #20: asyncio.Event replaces nonlocal bool for thread-safe is_playing tracking
     stream_id = None
     call_id = None
-
     audio_chunks: list[bytes] = []
     is_speech_active = False
     last_speech_time = 0.0
@@ -701,37 +868,53 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     consecutive_speech = 0
     consecutive_barge = 0
     active_turn_task = None
-    is_playing_audio = False
+    audio_queue: asyncio.Queue = asyncio.Queue()
+    is_playing_event = asyncio.Event()  # set = currently playing audio
+
+    async def vobiz_audio_sender():
+        """Drains the audio queue sequentially so sentences never interleave."""
+        while True:
+            item = await audio_queue.get()
+            if item is None:  # sentinel
+                break
+            text, lang = item
+            if not stream_id or not text.strip():
+                continue
+            is_playing_event.set()
+            try:
+                wav_bytes = await asyncio.to_thread(tts.synthesize, text.strip(), lang)
+                if not wav_bytes:
+                    continue
+                try:
+                    with io.BytesIO(wav_bytes) as bio, wave.open(bio, "rb") as wf:
+                        pcm_bytes = wf.readframes(wf.getnframes())
+                except Exception:
+                    pcm_bytes = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
+                b64_payload = base64.b64encode(pcm_bytes).decode("utf-8")
+                msg = {
+                    "event": "playAudio",
+                    "streamId": stream_id,
+                    "media": {
+                        "contentType": "audio/x-l16",
+                        "sampleRate": 16000,
+                        "payload": b64_payload,
+                    },
+                }
+                await websocket.send_text(json.dumps(msg))
+            except Exception as err:
+                print(f"[vobiz-ws] Error sending playAudio: {err}")
+            finally:
+                is_playing_event.clear()
 
     async def send_vobiz_audio(text: str, lang: str):
-        nonlocal is_playing_audio
-        if not stream_id or not text.strip():
-            return
-        try:
-            is_playing_audio = True
-            wav_bytes = await asyncio.to_thread(tts.synthesize, text.strip(), lang)
-            if not wav_bytes:
-                return
-            # Strip 44-byte WAV header to extract raw Linear16 PCM
-            pcm_bytes = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
-            b64_payload = base64.b64encode(pcm_bytes).decode("utf-8")
-            msg = {
-                "event": "playAudio",
-                "streamId": stream_id,
-                "media": {
-                    "contentType": "audio/x-l16",
-                    "sampleRate": 16000,
-                    "payload": b64_payload,
-                },
-            }
-            await websocket.send_text(json.dumps(msg))
-        except Exception as err:
-            print(f"[vobiz-ws] Error sending playAudio: {err}")
-        finally:
-            is_playing_audio = False
+        """Enqueues a sentence for sequential TTS playback."""
+        await audio_queue.put((text, lang))
+
+    # Start the sequential audio sender
+    _audio_sender_task = asyncio.create_task(vobiz_audio_sender())
 
     async def process_caller_audio(raw_pcm: bytes):
-        nonlocal active_turn_task
+        nonlocal active_turn_task, stream_id, call_id
         dur = len(raw_pcm) / 32000.0
         if dur < 0.45:
             return
@@ -750,7 +933,12 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
             return
 
         try:
-            print(f"🎙️ [vobiz-ws] Caller [{detected_lang}]: {transcript}")
+            # Dynamically determine the active turn language for telephony voice synthesis
+            turn_lang, bcp47, _ = llm.detect_turn_language(transcript, detected_lang)
+            print(f"🎤 [vobiz-ws] Caller [{bcp47}]: {transcript}")
+            if call_id:
+                db.log_call_query(call_id, transcript, lang=bcp47)
+
             is_hangup = is_hangup_intent(transcript)
 
             buffer = ""
@@ -759,10 +947,10 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 ready_sentences, buffer = split_ready_sentences(buffer)
                 for sentence in ready_sentences:
                     if sentence.strip():
-                        await send_vobiz_audio(sentence.strip(), detected_lang)
+                        await send_vobiz_audio(sentence.strip(), bcp47)
 
             if buffer.strip():
-                await send_vobiz_audio(buffer.strip(), detected_lang)
+                await send_vobiz_audio(buffer.strip(), bcp47)
 
             if is_hangup:
                 print("📞 [vobiz-ws] Caller hangup detected ({call_hangup: true}). Hanging up call.")
@@ -785,10 +973,12 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
             if event == "start":
                 stream_id = data.get("streamId") or data.get("stream_id")
-                call_id = data.get("callId") or data.get("call_id")
+                call_id = data.get("callId") or data.get("call_id") or ("CALL-TEL-" + uuid.uuid4().hex[:6].upper())
+                caller_num = data.get("caller") or data.get("from") or "Telephony"
+                db.log_call_start(call_id, caller_number=caller_num, language="gu-IN")
                 print(f"🚀 [vobiz-ws] Phone stream started: streamId={stream_id}, callId={call_id}")
-                # Greet caller with opening welcome message over the phone
-                asyncio.create_task(send_vobiz_audio(WELCOME_MESSAGE, "hi-IN"))
+                # Greet caller with opening welcome message in Gujarati over the phone
+                asyncio.create_task(send_vobiz_audio(WELCOME_MESSAGE, "gu-IN"))
 
             elif event == "media":
                 media = data.get("media", {})
@@ -804,21 +994,27 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
 
                 # Barge-in: if caller interrupts while agent is speaking, clear audio
-                if is_playing_audio:
+                if is_playing_event.is_set():  # Fix #20: use asyncio.Event
                     if rms > 0.045:
                         consecutive_barge += 1
                         if consecutive_barge >= 2:
                             print("🛑 [vobiz-ws] Barge-in confirmed from caller. Clearing playback queue.")
                             if active_turn_task and not active_turn_task.done():
                                 active_turn_task.cancel()
-                            is_playing_audio = False
+                            is_playing_event.clear()   # Fix #20: clear event instead of setting bool
+                            # Drain the audio queue to discard pending sentences
+                            while not audio_queue.empty():
+                                try:
+                                    audio_queue.get_nowait()
+                                except Exception:
+                                    break
                             await websocket.send_text(json.dumps({
                                 "event": "clearAudio",
                                 "streamId": stream_id,
                             }))
                             audio_chunks = [chunk_bytes]
                             is_speech_active = True
-                            last_speech_time = asyncio.get_event_loop().time()
+                            last_speech_time = asyncio.get_running_loop().time()
                     else:
                         consecutive_barge = 0
                     continue
@@ -831,13 +1027,13 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                         if not is_speech_active:
                             is_speech_active = True
                         audio_chunks.append(chunk_bytes)
-                        last_speech_time = asyncio.get_event_loop().time()
+                        last_speech_time = asyncio.get_running_loop().time()
                 else:
                     consecutive_speech = 0
                     if is_speech_active:
                         audio_chunks.append(chunk_bytes)
                         # Check 0.55s silence commit
-                        now = asyncio.get_event_loop().time()
+                        now = asyncio.get_running_loop().time()
                         if now - last_speech_time >= 0.55:
                             is_speech_active = False
                             total_pcm = b"".join(audio_chunks)
@@ -847,7 +1043,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                             active_turn_task = asyncio.create_task(process_caller_audio(total_pcm))
 
             elif event == "playedStream":
-                is_playing_audio = False
+                is_playing_event.clear()
 
             elif event == "stop":
                 print(f"👋 [vobiz-ws] Stream stopped: {stream_id}")
@@ -857,6 +1053,14 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
         print(f"👋 [vobiz-ws] Telephony client disconnected ({client_host})")
     except Exception as e:
         print(f"⚠️ [vobiz-ws] Telephony stream error: {e}")
+    finally:
+        if call_id:
+            db.log_call_end(call_id)
+            try:
+                from intelligence.post_call import analyze_and_record_call
+                asyncio.create_task(analyze_and_record_call(call_id, llm.history.copy(), db))
+            except Exception as pe:
+                print(f"[vobiz-ws] Telephony post-call notice: {pe}")
 
 
 def create_app():

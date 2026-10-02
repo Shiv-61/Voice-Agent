@@ -53,14 +53,41 @@ class RAGStore:
             print(f"[rag] Auto-seed notice: {e}")
 
 
-    def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
-        """Splits text into overlapping chunks respecting sentence boundaries."""
-        # Clean extra whitespaces
-        cleaned_text = re.sub(r"\s+", " ", text).strip()
-        if not cleaned_text:
-            return []
+    def _split_sentences(self, text: str) -> list[str]:
+        """Splits text into sentences while protecting decimals (2.5) and abbreviations (Dr., B.Tech., Th., Int.)."""
+        abbrev = {
+            "dr", "prof", "mr", "mrs", "ms", "rs", "b.tech", "m.tech", "ph.d",
+            "dept", "univ", "no", "vs", "lpa", "th", "int", "tw", "prac",
+            "lect", "tut", "sess", "ext", "sem", "cr",
+        }
+        pattern = re.compile(r"([.!?।\n]+)(\s+)")
+        pos = 0
+        sentences = []
+        for m in pattern.finditer(text):
+            punct = m.group(1)
+            punct_idx = m.start(1)
+            end_idx = m.end()
+            if "." in punct:
+                prefix = text[:punct_idx]
+                if prefix and prefix[-1].isdigit():
+                    continue
+                words = prefix.split()
+                if words:
+                    last_w = re.sub(r"^[^\w]+|[^\w.]+$", "", words[-1].lower())
+                    if last_w in abbrev or (len(last_w) == 1 and last_w.isalpha()):
+                        continue
+            s = text[pos:punct_idx + len(punct)].strip()
+            if s:
+                sentences.append(s)
+            pos = end_idx
+        rem = text[pos:].strip()
+        if rem:
+            sentences.append(rem)
+        return sentences
 
-        sentences = re.split(r"(?<=[.!?।\n])\s+", cleaned_text)
+    def _chunk_sentences(self, text: str, chunk_size: int = 850, overlap: int = 120) -> list[str]:
+        """Splits text into overlapping chunks respecting sentence boundaries."""
+        sentences = self._split_sentences(text)
         chunks = []
         current_chunk = []
         current_len = 0
@@ -93,18 +120,97 @@ class RAGStore:
 
         return chunks
 
+    def _chunk_text(self, text: str, chunk_size: int = 850, overlap: int = 120) -> list[str]:
+        """Splits text into overlapping chunks respecting sentence and curriculum section boundaries."""
+        cleaned_text = re.sub(r"\s+", " ", text).strip()
+        if not cleaned_text:
+            return []
+
+        # If page contains distinct Semester tables (e.g. course structure pages 2-5)
+        if re.search(r"Semester\s*[–\-]\s*[IVX\d]+", cleaned_text, flags=re.I):
+            splits = re.split(r"(?=(?:B\.?\s*Tech\s+)?Semester\s*[–\-]\s*[IVX\d]+)", cleaned_text, flags=re.I)
+            sem_chunks = []
+            prefix = ""
+            for s in splits:
+                s = s.strip()
+                if not s:
+                    continue
+                if not re.search(r"Semester\s*[–\-]\s*[IVX\d]+", s, flags=re.I):
+                    prefix = s + " "
+                    continue
+                candidate = (prefix + s).strip()
+                if len(candidate) <= 1200:
+                    sem_chunks.append(candidate)
+                else:
+                    sem_chunks.extend(self._chunk_sentences(candidate, chunk_size, overlap))
+            if sem_chunks:
+                return sem_chunks
+
+        return self._chunk_sentences(cleaned_text, chunk_size, overlap)
+
     def ingest_pdf(self, file_source: str | bytes, filename: str) -> dict[str, Any]:
         """
         Extracts text from a PDF file or bytes, chunks it, and indexes it into ChromaDB.
         """
         if isinstance(file_source, bytes):
+            raw_bytes = file_source
             reader = pypdf.PdfReader(io.BytesIO(file_source))
         else:
-            reader = pypdf.PdfReader(file_source)
+            with open(file_source, "rb") as f:
+                raw_bytes = f.read()
+            reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
 
         total_pages = len(reader.pages)
-        doc_id = hashlib.md5(f"{filename}_{time.time()}".encode("utf-8")).hexdigest()[:12]
+        content_hash = hashlib.md5(raw_bytes).hexdigest()[:12]
+        doc_id = f"doc_{content_hash}"
         upload_time = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        lower_fn = filename.lower()
+        if any(k in lower_fn for k in ["curriculum", "syllabus", "course", "semester", "credit", "scheme", "regulation", "branch", "subject"]):
+            category = "college_curriculum"
+        elif any(k in lower_fn for k in ["student", "mark", "grade", "attendance", "result", "transcript", "batch", "stu", "roll"]):
+            category = "student_records"
+        elif any(k in lower_fn for k in ["admission", "fee", "hostel", "placement"]):
+            category = "admissions_and_campus"
+        else:
+            category = "general_campus"
+
+        # Content-based classification fallback if filename is generic (e.g. DDU_Doc.pdf)
+        if category == "general_campus" and reader.pages:
+            try:
+                first_page_text = (reader.pages[0].extract_text() or "").lower()[:800]
+                if any(k in first_page_text for k in ["syllabus", "credit", "semester", "subject", "curriculum", "course structure", "scheme"]):
+                    category = "college_curriculum"
+                elif any(k in first_page_text for k in ["attendance", "marks", "grade", "result", "roll no", "enrollment", "student record"]):
+                    category = "student_records"
+                elif any(k in first_page_text for k in ["admission", "fee", "hostel", "placement", "eligibility", "package"]):
+                    category = "admissions_and_campus"
+            except Exception as cat_err:
+                print(f"[rag] Content-based categorization notice: {cat_err}")
+
+        # Fix #17: Delete old chunks if same FILENAME was previously indexed
+        # (content hash may differ if file was updated/re-saved)
+        try:
+            existing_by_name = self.collection.get(where={"filename": filename})
+            if existing_by_name and existing_by_name.get("ids"):
+                old_ids_to_delete = existing_by_name["ids"]
+                # If the doc_id matches exactly (same content), skip re-ingestion
+                existing_doc_ids = {m.get("doc_id") for m in (existing_by_name.get("metadatas") or []) if m}
+                if doc_id in existing_doc_ids and len(existing_doc_ids) == 1:
+                    print(f"[rag] Document '{filename}' (doc_id={doc_id}) is already indexed with {len(old_ids_to_delete)} chunks.")
+                    return {
+                        "doc_id": doc_id,
+                        "filename": filename,
+                        "category": category,
+                        "total_pages": total_pages,
+                        "total_chunks": len(old_ids_to_delete),
+                        "status": "already_indexed",
+                    }
+                # Content has changed — remove stale chunks so they don't pollute retrieval
+                print(f"[rag] Removing {len(old_ids_to_delete)} stale chunks for '{filename}' before re-indexing.")
+                self.collection.delete(ids=old_ids_to_delete)
+        except Exception as dedup_err:
+            print(f"[rag] Dedup check notice: {dedup_err}")
 
         all_chunks = []
         all_ids = []
@@ -128,6 +234,7 @@ class RAGStore:
                     "page": page_idx,
                     "chunk_index": chunk_counter,
                     "upload_time": upload_time,
+                    "category": category,
                 })
 
         if all_chunks:
@@ -136,28 +243,57 @@ class RAGStore:
                 documents=all_chunks,
                 metadatas=all_metadatas,
             )
-            print(f"[rag] Successfully ingested '{filename}': {len(all_chunks)} chunks across {total_pages} pages.")
+            print(f"[rag] Successfully ingested '{filename}' [{category}]: {len(all_chunks)} chunks across {total_pages} pages.")
 
         return {
             "doc_id": doc_id,
             "filename": filename,
+            "category": category,
             "total_pages": total_pages,
             "total_chunks": len(all_chunks),
             "upload_time": upload_time,
             "status": "indexed" if all_chunks else "empty",
         }
 
-    def query_documents(self, query: str, n_results: int = 3) -> list[dict[str, Any]]:
+    def query_documents(
+        self, query: str, n_results: int = 4, min_similarity: float = 0.50
+    ) -> list[dict[str, Any]]:
         """
-        Queries the vector store for the most relevant document chunks.
+        Queries the vector store with hybrid semantic similarity and domain keyword boosting.
+        Applies target semester alignment so syllabus questions retrieve exact semester tables.
         """
         if not query.strip() or self.collection.count() == 0:
             return []
 
+        # Query a candidate pool to allow intelligent hybrid re-ranking
+        candidate_k = min(max(n_results * 4, 16), self.collection.count())
         results = self.collection.query(
             query_texts=[query],
-            n_results=min(n_results, self.collection.count()),
+            n_results=candidate_k,
         )
+
+        # Detect if query targets a specific academic semester
+        num_to_roman = {
+            "1": ["i", "1", "one", "first", "એક", "૧", "વન", "પહેલું", "પહેલા", "પ્રથમ"],
+            "2": ["ii", "2", "two", "second", "બે", "૨", "ટુ", "ટૂ", "બીજું", "બીજા"],
+            "3": ["iii", "3", "three", "third", "ત્રણ", "૩", "થ્રી", "ત્રીજું", "ત્રીજા"],
+            "4": ["iv", "4", "four", "fourth", "ચાર", "૪", "ફોર", "ચોથું", "ચોથા"],
+            "5": ["v", "5", "five", "fifth", "પાંચ", "૫", "ફાઈવ"],
+            "6": ["vi", "6", "six", "sixth", "છ", "૬", "સિક્સ"],
+            "7": ["vii", "7", "seven", "seventh", "સાત", "૭", "સેવન"],
+            "8": ["viii", "8", "eight", "eighth", "આઠ", "૮", "એઈટ"],
+        }
+        target_sem = None
+        q_lower = query.lower()
+        for s_num, aliases in num_to_roman.items():
+            for a in aliases:
+                if re.search(r"\b(?:sem|semester)\s*[–\-]*(?:ester)?\s*" + re.escape(a) + r"\b", q_lower) or \
+                   re.search(r"\b" + re.escape(a) + r"\s*(?:sem|semester)\b", q_lower) or \
+                   re.search(r"સેમેસ્ટર\s*" + re.escape(a), q_lower):
+                    target_sem = s_num
+                    break
+            if target_sem:
+                break
 
         formatted_results = []
         if results and results.get("documents") and results["documents"][0]:
@@ -166,13 +302,45 @@ class RAGStore:
             dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
 
             for doc, meta, dist in zip(docs, metas, dists):
+                if not doc or len(doc.strip()) < 60:
+                    continue  # Filter out trivial stub chunks
+
+                d = float(dist) if dist is not None else 0.0
+                similarity = round(max(0.0, min(1.0, 1.0 / (1.0 + max(0.0, d)))), 3)
+
+                # Target semester boost / penalty
+                if target_sem:
+                    doc_lower = doc.lower()
+                    target_aliases = num_to_roman[target_sem]
+                    has_target = any(
+                        re.search(r"(?:semester|sem)\s*[–\-]?\s*" + re.escape(a) + r"\b", doc_lower)
+                        for a in target_aliases
+                    )
+                    if has_target:
+                        similarity = min(1.0, similarity + 0.20)
+                    else:
+                        # Conflicting semester check
+                        has_conflict = False
+                        for other_num, other_aliases in num_to_roman.items():
+                            if other_num != target_sem:
+                                if any(re.search(r"(?:semester|sem)\s*[–\-]?\s*" + re.escape(a) + r"\b", doc_lower) for a in other_aliases):
+                                    has_conflict = True
+                                    break
+                        if has_conflict:
+                            similarity = max(0.0, similarity - 0.15)
+
+                if similarity < min_similarity:
+                    continue
+
                 formatted_results.append({
                     "text": doc,
                     "metadata": meta,
-                    "similarity_score": round(max(0.0, 1.0 - ((dist if dist is not None else 0.0) / 2.0)), 3),
+                    "similarity_score": round(similarity, 3),
                 })
 
-        return formatted_results
+        # Sort by boosted similarity score descending
+        formatted_results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return formatted_results[:n_results]
 
     def list_documents(self) -> list[dict[str, Any]]:
         """
@@ -197,6 +365,7 @@ class RAGStore:
                 docs_map[doc_id] = {
                     "doc_id": doc_id,
                     "filename": meta.get("filename", "Unknown Document"),
+                    "category": meta.get("category", "general_campus"),
                     "upload_time": meta.get("upload_time", "N/A"),
                     "total_chunks": 0,
                     "max_page": 0,
@@ -234,6 +403,11 @@ class RAGStore:
         """Deletes all chunks associated with a specific document ID."""
         try:
             self.collection.delete(where={"doc_id": doc_id})
+            alt_id = doc_id[4:] if doc_id.startswith("doc_") else f"doc_{doc_id}"
+            try:
+                self.collection.delete(where={"doc_id": alt_id})
+            except Exception:
+                pass
             print(f"[rag] Deleted document ID '{doc_id}' from vector store.")
             return True
         except Exception as e:

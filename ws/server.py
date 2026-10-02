@@ -16,32 +16,36 @@ from websockets.asyncio.server import ServerConnection
 
 import config
 from stt import STT
-from llm import LLM
+from llm.llm import LLM, WELCOME_MESSAGE
 from tts import TTS
+from db.database import Database
+from rag import RAGStore
 from utils.filler_manager import FillerManager
 from utils import split_ready_sentences
 
 
 class VoiceCallSession:
-    def __init__(self):
+    def __init__(self, db: Database = None, rag: RAGStore = None):
+        self.db = db or Database()
+        self.rag = rag or RAGStore()
         self.stt = STT()
-        self.llm = LLM()
+        self.llm = LLM(db=self.db, rag=self.rag)
         self.tts = TTS()
         self.filler_mgr = FillerManager(tts=self.tts)
-        self.language_code = config.DEFAULT_LANGUAGE
+        self.language_code = "gu-IN"
 
     async def handle_audio_stream(self, audio_bytes: bytes, websocket: ServerConnection):
         """
         Process incoming audio payload with real-time streaming:
         1. STT -> Transcribe text in worker thread
-        2. LLM -> Stream tokens asynchronously
+        2. LLM -> Stream tokens asynchronously with anticipatory context
         3. TTS -> Synthesize each sentence in worker thread and stream chunk immediately!
         """
         if not audio_bytes or len(audio_bytes) < 100:
             return
 
-        # Immediate acoustic filler bridge for telephony callers (< 150ms)
-        if len(audio_bytes) >= 16000:
+        # Acoustic filler bridge for telephony callers (disabled by default)
+        if getattr(config, "ENABLE_ACOUSTIC_FILLER", False) and len(audio_bytes) >= 16000:
             filler = self.filler_mgr.get_filler(self.language_code)
             if filler:
                 try:
@@ -62,8 +66,9 @@ class VoiceCallSession:
             print("[ws-session] (empty transcription)")
             return
 
-        print(f"[ws-session] User [{detected_lang}]: {transcript}")
-        self.language_code = detected_lang
+        turn_lang, bcp47, _ = self.llm.detect_turn_language(transcript, detected_lang)
+        self.language_code = bcp47
+        print(f"[ws-session] User [{bcp47}]: {transcript}")
 
         buffer = ""
         sentence_queue = asyncio.Queue()
@@ -79,14 +84,14 @@ class VoiceCallSession:
                         s = sentence.strip()
                         if s:
                             synth_task = asyncio.create_task(
-                                asyncio.to_thread(self.tts.synthesize, s, detected_lang)
+                                asyncio.to_thread(self.tts.synthesize, s, bcp47)
                             )
                             await sentence_queue.put(synth_task)
 
                 if buffer.strip():
                     rem = buffer.strip()
                     synth_task = asyncio.create_task(
-                        asyncio.to_thread(self.tts.synthesize, rem, detected_lang)
+                        asyncio.to_thread(self.tts.synthesize, rem, bcp47)
                     )
                     await sentence_queue.put(synth_task)
             finally:

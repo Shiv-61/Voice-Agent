@@ -9,6 +9,7 @@ import wave
 import numpy as np
 
 import config
+from utils.text_utils import normalize_lang as _normalize_lang_shared  # Fix #18: shared util
 
 try:
     from faster_whisper import WhisperModel
@@ -20,9 +21,30 @@ except ImportError:
 class STT:
     _whisper_model = None
 
+    @classmethod
+    def get_whisper_model(cls):
+        """Lazily initialize and return the cached faster-whisper model."""
+        if cls._whisper_model is None:
+            if not FASTER_WHISPER_AVAILABLE:
+                raise RuntimeError(
+                    "faster-whisper is not installed. Install with: uv pip install faster-whisper"
+                )
+            model_size = getattr(config, "WHISPER_MODEL_SIZE", "base")
+            device = getattr(config, "WHISPER_DEVICE", "cpu")
+            compute_type = getattr(config, "WHISPER_COMPUTE_TYPE", "int8")
+            print(f"[stt] Loading faster-whisper ({model_size}, {device}, {compute_type})...")
+            cls._whisper_model = WhisperModel(
+                model_size,
+                device=device,
+                compute_type=compute_type,
+            )
+            print("[stt] faster-whisper model ready.")
+        return cls._whisper_model
+
     def __init__(self):
         self.provider = getattr(config, "STT_PROVIDER", "faster-whisper")
         self.sarvam_client = None
+        self._sarvam_quota_exceeded = False
 
         if self.provider == "sarvam":
             if not config.SARVAM_API_KEY:
@@ -38,35 +60,13 @@ class STT:
                     self.provider = "faster-whisper"
 
         if self.provider == "faster-whisper":
-            if not FASTER_WHISPER_AVAILABLE:
-                raise RuntimeError(
-                    "faster-whisper is not installed. Install with: pip install faster-whisper"
-                )
-            if STT._whisper_model is None:
-                model_size = getattr(config, "WHISPER_MODEL_SIZE", "base")
-                device = getattr(config, "WHISPER_DEVICE", "cpu")
-                compute_type = getattr(config, "WHISPER_COMPUTE_TYPE", "int8")
-                print(f"[stt] Loading faster-whisper ({model_size}, {device}, {compute_type})...")
-                STT._whisper_model = WhisperModel(
-                    model_size,
-                    device=device,
-                    compute_type=compute_type,
-                )
-                print("[stt] faster-whisper model ready.")
-            self.whisper_model = STT._whisper_model
+            self.whisper_model = self.get_whisper_model()
 
     def _normalize_lang(self, lang: str | None) -> str:
+        """Delegates to the shared normalize_lang utility (Fix #18)."""
         if not lang or lang == "unknown":
             return "unknown"
-        if lang in ("en", "en-IN"):
-            return "en-IN"
-        if lang in ("hi", "hi-IN"):
-            return "hi-IN"
-        if lang in ("gu", "gu-IN"):
-            return "gu-IN"
-        if len(lang) == 2:
-            return f"{lang}-IN"
-        return lang
+        return _normalize_lang_shared(lang, default="unknown")
 
     def _whisper_lang(self, lang: str | None) -> str | None:
         if not lang or lang == "unknown":
@@ -86,18 +86,26 @@ class STT:
         if not audio_bytes or len(audio_bytes) < 100:
             return "", "unknown"
 
-        if self.provider == "faster-whisper":
+        active_provider = "faster-whisper" if (self.provider == "faster-whisper" or self._sarvam_quota_exceeded) else "sarvam"
+
+        if active_provider == "faster-whisper":
             transcript, detected_lang = self._transcribe_whisper(audio_bytes, language_code)
         else:
             transcript, detected_lang = self._transcribe_sarvam(audio_bytes, language_code)
 
         if transcript.strip():
-            print("\n" + "=" * 60)
-            print(f"🎙️  SPEECH TRANSCRIPTION [{detected_lang.upper()}] (Engine: {self.provider}):")
-            print(f"👉  \"{transcript.strip()}\"")
-            print("=" * 60 + "\n", flush=True)
+            try:
+                print("\n" + "=" * 60)
+                print(f"🎙️  SPEECH TRANSCRIPTION [{detected_lang.upper()}] (Engine: {active_provider}):")
+                print(f"👉  \"{transcript.strip()}\"")
+                print("=" * 60 + "\n", flush=True)
+            except Exception:
+                print(f"[STT {active_provider}] Transcribed [{detected_lang.upper()}]: {transcript.strip()[:60]}", flush=True)
         else:
-            print(f"⚠️  [STT {self.provider}] No words detected in audio snippet", flush=True)
+            try:
+                print(f"[STT {active_provider}] No words detected in audio snippet", flush=True)
+            except Exception:
+                pass
 
         return transcript, detected_lang
 
@@ -107,22 +115,33 @@ class STT:
         language_code: str | None = None,
     ) -> tuple[str, str]:
         try:
+            whisper_model = self.get_whisper_model()
             target_lang = self._whisper_lang(language_code)
             bio = io.BytesIO(audio_bytes)
 
-            # vad_filter=False because frontend VAD or push-to-talk already isolates the speech segment
-            segments, info = self.whisper_model.transcribe(
-                bio,
-                language=target_lang,
-                beam_size=5,
-                vad_filter=False,
-            )
+            # Enable vad_filter with fallback to reduce background noise hallucinations
+            try:
+                segments, info = whisper_model.transcribe(
+                    bio,
+                    language=target_lang,
+                    beam_size=5,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 300},
+                )
+            except Exception:
+                bio.seek(0)
+                segments, info = whisper_model.transcribe(
+                    bio,
+                    language=target_lang,
+                    beam_size=5,
+                    vad_filter=False,
+                )
             transcript = " ".join(s.text.strip() for s in segments if s.text).strip()
             detected_lang = self._normalize_lang(info.language or language_code)
             return transcript, detected_lang
         except Exception as e:
             print(f"[stt] faster-whisper transcription error: {e}")
-            if self.sarvam_client:
+            if self.sarvam_client and not self._sarvam_quota_exceeded:
                 print("[stt] Attempting Sarvam STT fallback...")
                 return self._transcribe_sarvam(audio_bytes, language_code)
             return "", "unknown"
@@ -147,11 +166,13 @@ class STT:
             detected_lang = getattr(response, "language_code", None) or lang or "en-IN"
             return transcript, self._normalize_lang(detected_lang)
         except Exception as e:
-            print(f"[stt] Sarvam STT error: {e}")
-            if hasattr(self, "whisper_model") and self.whisper_model:
-                print("[stt] Attempting faster-whisper fallback...")
-                return self._transcribe_whisper(audio_bytes, language_code)
-            return "", "unknown"
+            err_str = str(e)
+            print(f"[stt] Sarvam STT notice: {err_str}")
+            if "402" in err_str or "insufficient_quota" in err_str:
+                print("[stt] Sarvam STT quota reached (402). Switching automatically to faster-whisper local STT.")
+                self._sarvam_quota_exceeded = True
+            print("[stt] Attempting faster-whisper fallback...")
+            return self._transcribe_whisper(audio_bytes, language_code)
 
     @staticmethod
     def numpy_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:

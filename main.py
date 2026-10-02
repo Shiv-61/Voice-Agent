@@ -48,7 +48,7 @@ def run_cli_mode():
     # Speak initial welcome greeting
     print(f"🤖 Agent: {WELCOME_MESSAGE}\n")
     try:
-        tts.speak_local(WELCOME_MESSAGE, language_code="hi-IN")
+        tts.speak_local(WELCOME_MESSAGE, language_code="gu-IN")  # Fix #15: welcome is Gujarati
     except Exception as e:
         print(f"[cli] Notice playing welcome audio: {e}")
 

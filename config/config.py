@@ -36,11 +36,11 @@ TTS_SPEED = 1.0
 # ---- Language ----
 # BCP-47 codes used by Sarvam
 SUPPORTED_LANGUAGES = {
-    "en": "en-IN",
-    "hi": "hi-IN",
     "gu": "gu-IN",
+    "hi": "hi-IN",
+    "en": "en-IN",
 }
-DEFAULT_LANGUAGE = "en"               # fallback language code
+DEFAULT_LANGUAGE = "gu"               # primary language code (Gujarati)
 
 # ---- LLM Configuration ----
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "sarvam").lower()  # sarvam | openrouter | groq | ollama
@@ -78,3 +78,4 @@ CHROMA_PERSIST_DIR = os.getenv(
 
 # ---- Audio ----
 SAMPLE_RATE = 16000                   # Sarvam expects 16kHz for PCM
+ENABLE_ACOUSTIC_FILLER = os.getenv("ENABLE_ACOUSTIC_FILLER", "false").lower() in ("true", "1", "yes")
