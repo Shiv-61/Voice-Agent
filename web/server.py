@@ -71,6 +71,18 @@ def get_shared_stt() -> STT:
     return _shared_stt
 
 
+@app.on_event("startup")
+async def startup_event():
+    print("🚀 Initializing Voice Agent Subsystems...")
+    stt_inst = get_shared_stt()
+    tts_inst = get_shared_tts()
+    print(f"[stt] Active Provider: {stt_inst.provider.upper()} (Sarvam client: {'ready' if stt_inst.sarvam_client else 'not configured'})")
+    print(f"[tts] Active Provider: {'SARVAM' if tts_inst.client else 'Edge-TTS fallback'} (Speaker: {config.TTS_SPEAKER})")
+    print(f"[llm] Active Provider: {config.LLM_PROVIDER.upper()} | Model: {config.LLM_MODEL} | Temp: {config.LLM_TEMPERATURE}")
+    print("✅ All systems ready and listening for calls.")
+
+
+
 @app.get("/healthz")
 async def health_check():
     """Lightweight zero-dependency health check endpoint for Render monitoring."""
@@ -260,15 +272,28 @@ async def get_dashboard_summary():
 @app.get("/api/data/students")
 async def get_all_students():
     """Lists students with details, marks, and attendance."""
-    query = """
-        SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
-        FROM students s
-        JOIN departments d ON s.department_id = d.department_id
-        ORDER BY s.student_id
-    """
+    if db.use_sqlite:
+        query = """
+            SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
+            FROM students s
+            JOIN departments d ON s.department_id = d.department_id
+            ORDER BY s.student_id
+        """
+    else:
+        query = """
+            SELECT COALESCE(s.student_id, 'STU' || s.id::text) AS student_id,
+                   COALESCE(s.name, s.student_name) AS name,
+                   COALESCE(d.department_name, s.course, s.department_id, 'General') AS department_name,
+                   COALESCE(s.semester, 4) AS semester,
+                   COALESCE(s.parent_phone, s.mobile_number, '') AS parent_phone,
+                   s.cpi, s.attendance_percentage
+            FROM students s
+            LEFT JOIN departments d ON s.department_id = d.department_id
+            ORDER BY s.id
+        """
     students = db._execute_query(query)
     for s in students:
-        s_id = s["student_id"]
+        s_id = str(s.get("student_id") or "")
         s["marks"] = db.get_student_marks(s_id)
         s["attendance"] = db.get_student_attendance(s_id)
 
@@ -441,7 +466,7 @@ class WebVoiceSession:
             return
 
         # Dynamically determine the active turn language for TTS and UI synchronization
-        turn_lang, bcp47, _ = self.llm.detect_turn_language(user_text, self.language_code)
+        turn_lang, bcp47, _ = self.llm.detect_turn_language(user_text, self.language_code, stt_lang=detected_lang)
         self.language_code = bcp47
         active_lang = bcp47
 
@@ -459,7 +484,7 @@ class WebVoiceSession:
         async def llm_producer():
             nonlocal buffer, full_agent_reply
             try:
-                async for piece in self.llm.areply_stream(user_text):
+                async for piece in self.llm.areply_stream(user_text, stt_lang=detected_lang):
                     buffer += piece
                     full_agent_reply += piece
                     ready_sentences, buffer = split_ready_sentences(buffer)
@@ -627,10 +652,10 @@ class WebVoiceSession:
                 except Exception as fe:
                     print(f"[web-ws] Notice sending filler audio: {fe}")
 
-        # Fix #5: use last known STT turn language as hint for better accuracy
+        # Allow STT engine (Sarvam saaras / faster-whisper) to dynamically detect the spoken language on every turn
         try:
             transcript, detected_lang = await asyncio.to_thread(
-                self.stt.transcribe, audio_bytes, self.last_stt_lang
+                self.stt.transcribe, audio_bytes, None
             )
 
         except Exception as e:
@@ -739,6 +764,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         session.end_call_log()
                         # Reset LLM conversation history for the fresh call
                         session.llm.history = [{"role": "assistant", "content": WELCOME_MESSAGE}]
+                        session.llm.active_student_id = None
+                        session.llm.active_student_name = None
                         session.ensure_call_log()
                         await session.send_json_safe({
                             "event": "call_started_ack",
@@ -789,7 +816,6 @@ async def websocket_call_endpoint(websocket: WebSocket):
 
                     elif event == "interrupt":
                         # Client signal to interrupt playback and current processing
-                        print(f"🛑 [web-ws] Barge-in interruption from {client_host}")
                         session.cancel_active_pipeline()
                         await session.send_json_safe({"event": "interrupted"})
 
@@ -927,7 +953,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
             wf.writeframes(raw_pcm)
         wav_data = out_bio.getvalue()
 
-        transcript, detected_lang = await asyncio.to_thread(stt.transcribe, wav_data, config.DEFAULT_LANGUAGE)
+        transcript, detected_lang = await asyncio.to_thread(stt.transcribe, wav_data, None)
         if not transcript.strip() or is_noise_hallucination(transcript, dur, 0.04):
             print(f"🔇 [vobiz-ws] Discarded noise artifact: \"{transcript.strip()}\"")
             return
@@ -942,7 +968,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
             is_hangup = is_hangup_intent(transcript)
 
             buffer = ""
-            async for piece in llm.areply_stream(transcript):
+            async for piece in llm.areply_stream(transcript, stt_lang=detected_lang):
                 buffer += piece
                 ready_sentences, buffer = split_ready_sentences(buffer)
                 for sentence in ready_sentences:

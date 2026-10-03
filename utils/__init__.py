@@ -10,6 +10,9 @@ from .text_utils import (
     is_filler_phrase,
     normalize_lang,
     get_error_message,
+    HOLD_PHRASES,
+    HOLD_PHRASE_REGEX,
+    query_needs_db_or_rag,
 )
 
 __all__ = [
@@ -21,4 +24,7 @@ __all__ = [
     "is_filler_phrase",
     "normalize_lang",
     "get_error_message",
+    "HOLD_PHRASES",
+    "HOLD_PHRASE_REGEX",
+    "query_needs_db_or_rag",
 ]

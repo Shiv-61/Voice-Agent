@@ -982,16 +982,9 @@ class VoiceAgentApp {
 
   async initAudioContext() {
     if (!this.audioContext) {
-      try {
-        this.audioContext = new (
-          window.AudioContext || window.webkitAudioContext
-        )({ sampleRate: 16000 });
-      } catch (e) {
-        console.warn("Forced 16kHz context not supported, using default sampleRate:", e);
-        this.audioContext = new (
-          window.AudioContext || window.webkitAudioContext
-        )();
-      }
+      this.audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
     }
     if (this.audioContext.state === "suspended") {
       await this.audioContext.resume();
@@ -1057,12 +1050,12 @@ class VoiceAgentApp {
       // --- BARGE-IN: If customer speaks while agent is speaking, stop agent immediately ---
       if (this.isPlayingAudio) {
         const playbackElapsed = Date.now() - (this.playbackStartTime || 0);
-        const isInitialGreeting = (Date.now() - (this.callStartTime || 0)) < 3500;
-        // Higher threshold during initial greeting to prevent laptop speaker echo from self-barging
+        const isInitialGreeting = (Date.now() - (this.callStartTime || 0)) < 12000;
+        // Resilient threshold during speech playback to prevent laptop speaker echo from triggering false interruptions
         const bargeInThreshold = isInitialGreeting
-          ? Math.max(0.13, dynamicSpeechThreshold * 3.5)
-          : Math.max(0.065, dynamicSpeechThreshold * 2.2);
-        const requiredFrames = isInitialGreeting ? 5 : Math.max(3, this.requiredBargeInFrames || 3);
+          ? Math.max(0.18, dynamicSpeechThreshold * 4.0)
+          : Math.max(0.12, dynamicSpeechThreshold * 2.8);
+        const requiredFrames = isInitialGreeting ? 8 : Math.max(5, this.requiredBargeInFrames || 5);
 
         if (playbackElapsed > 500 && rms > bargeInThreshold) {
           this.consecutiveBargeInFrames++;
@@ -1070,6 +1063,7 @@ class VoiceAgentApp {
             console.log(
               `🛑 Caller interrupted while agent was speaking (RMS: ${rms.toFixed(3)} > ${bargeInThreshold.toFixed(3)}). Stopping agent playback.`,
             );
+            this.consecutiveBargeInFrames = 0;
             this.interruptAgent(true);
             this.isSpeechDetected = true;
             this.consecutiveSpeechFrames = this.requiredSpeechFrames;
@@ -1226,7 +1220,7 @@ class VoiceAgentApp {
 
     // Verify overall RMS of recorded audio. If below speech threshold, discard as ambient noise
     const overallRms = Math.sqrt(sumSquares / totalLength);
-    if (overallRms < this.minSpeechThreshold * 0.70) {
+    if (overallRms < this.minSpeechThreshold * 0.40) {
       console.log(`🔇 Discarded ambient noise buffer (RMS: ${overallRms.toFixed(4)})`);
       this.updateStateText("Listening. Speak whenever you are ready.");
       return;

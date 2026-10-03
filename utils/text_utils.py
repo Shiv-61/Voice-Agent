@@ -177,6 +177,120 @@ def clean_speech_text(text: str) -> str:
     return cleaned
 
 
+# Standard hold phrases across Gujarati, Hindi, and English for DB & RAG lookups
+HOLD_PHRASES: dict[str, str] = {
+    "gu": "કૃપા કરીને લાઇન પર રહો.",
+    "hi": "कृपया लाइन पर बने रहें।",
+    "en": "Please stay on the line.",
+}
+
+# Regex to detect and strip duplicate hold phrases produced by LLMs
+HOLD_PHRASE_REGEX = re.compile(
+    r"^(?:(?:હા|જી|હાજી|हाँ|जी|sure|ok|okay),?\s*)?"
+    r"(?:(?:કૃપા\s*કરીને|કૃપા\s*કરી)\s*(?:લાઇન|લાઈન)\s*પર\s*(?:રહો|બને\s*રહો)|"
+    r"कृपया\s*लाइन\s*पर\s*(?:बने\s*रहें|रहें)|"
+    r"please\s*(?:stay|hold)\s*(?:on\s*)?(?:the\s*)?line)"
+    r"(?:[.,!|।]*\s*(?:હું\s*(?:હમણાં\s*જ\s*)?(?:વિગતો|માહિતી)\s*(?:જોઈ\s*લઉં\s*છું|તપાસું\s*છું)|"
+    r"मैं\s*(?:अभी\s*)?(?:जानकारी|डिटेल्स|रिकॉर्ड)\s*(?:देख\s*रही\s*हूँ|चेक\s*करती\s*हूँ)|"
+    r"(?:let\s*me\s*check|let\s*me\s*find)\s*(?:that|the\s*details)?(?:\s*for\s*you)?))?[.,!।]*\s*",
+    re.IGNORECASE
+)
+
+
+def query_needs_db_or_rag(text: str, has_student: bool = False) -> bool:
+    """
+    Detects if caller's query requires looking up records in the database or RAG document store.
+    Personal student queries only return True if a student identifier is present or resolved.
+    """
+    if not text:
+        return False
+    lower = text.lower()
+
+    # 1. Direct Student ID match (always True)
+    has_student_id = bool(re.search(r'\b(?:stu\s*\d+|student\s*\d+|2[0-9]it\d+|it\d+|ce\d+|ec\d+)\b', lower))
+    if has_student_id:
+        return True
+
+    # Distinguish personal student queries from general policy inquiries
+    personal_indicators = [
+        "son", "daughter", "child", "kid", "beta", "beti", "bachha", "baccha",
+        "dikro", "dikra", "dikri", "chokro", "chokra", "chokri",
+        "maro", "mari", "maru", "mara", "mare",
+        "mera", "meri", "mere", "my", "his", "her", "student", "roll",
+        "દીકર", "છોકર", "પુત્ર", "માર", "તમાર", "વિદ્યાર્થી", "બાળક",
+        "बेट", "बच्च", "पुत्र", "मेर", "छात्र", "विद्यार्थी", "रोल"
+    ]
+    policy_indicators = [
+        "rule", "rules", "policy", "policies", "criteria", "requirement", "requirements",
+        "minimum", "mandatory", "compulsory", "allowed", "regulation", "regulations",
+        "નિયમ", "નિયમો", "પોલિસી", "શરત", "જરૂરી", "ઓછામાં ઓછી",
+        "નિયમો", "નિયમ",
+        "नियम", "पॉलिसी", "शर्त", "जरूरी", "न्यूनतम", "अनिवार्य"
+    ]
+    student_keywords = [
+        "attendance", "attedance", "atendance", "attandance", "attendence",
+        "marks", "cpi", "cgpa", "spi", "result", "grade", "score", "roll number",
+        "roll no", "student", "batch", "passing year", "mobile number", "contact number",
+        "એટેન્ડન્સ", "હાજરી", "માર્ક્સ", "ગુણ", "સીપીઆઈ", "વિદ્યાર્થી", "રોલ નંબર", "પરિણામ",
+        "અટેન્ડન્સ", "માર્ક",
+        "अटेंडेंस", "उपस्थिति", "मार्क्स", "अंक", "सीपीआई", "छात्र", "रोल नंबर", "रिजल्ट",
+        "परिणाम", "छात्र रिकॉर्ड",
+    ]
+
+    has_student_kw = any(k in lower for k in student_keywords)
+    has_personal_ind = any(k in lower for k in personal_indicators)
+    has_policy_ind = any(k in lower for k in policy_indicators)
+
+    # Personal student queries without an identified student do NOT need DB yet
+    if has_student_kw:
+        if has_student:
+            return True
+        if has_personal_ind and not has_policy_ind:
+            return False
+        if not has_policy_ind and any(k in lower for k in ["attendance", "attedance", "marks", "result", "હાજરી", "માર્ક્સ", "अटेंडेंस", "मार्क्स"]):
+            return False
+        if has_policy_ind:
+            return True
+
+    # 2. Admission & Fees queries
+    adm_keywords = [
+        "admission", "eligibility", "fee", "fees", "tuition", "deadline", "last date",
+        "cutoff", "cut-off", "seat", "seats", "intake", "apply", "process",
+        "એડમિશન", "દાખલો", "પ્રવેશ", "ફી", "લાયકાત", "છેલ્લી તારીખ", "બેઠક",
+        "एडमिशन", "प्रवेश", "दाखिला", "फीस", "फी", "शुल्क", "पात्रता", "कटऑफ",
+        "अंतिम तिथि", "सीट",
+    ]
+    if any(k in lower for k in adm_keywords):
+        return True
+
+    # 3. Placement records
+    placement_keywords = [
+        "placement", "placements", "package", "salary", "recruiter", "recruiters",
+        "highest package", "average package", "placed", "company", "companies",
+        "પ્લેસમેન્ટ", "પેકેજ", "નોકરી", "કંપની",
+        "प्लेसमेंट", "पैकेज", "सैलरी", "नौकरी", "कंपनी", "कंपनियां",
+    ]
+    if any(k in lower for k in placement_keywords):
+        return True
+
+    # 4. Curriculum, Syllabus, Hostel, Policy documents (RAG)
+    rag_keywords = [
+        "syllabus", "curriculum", "subject", "subjects", "semester", "credit", "credits",
+        "course structure", "teaching scheme", "exam", "examination",
+        "hostel", "mess", "curfew", "rules", "rule", "regulations", "scholarship",
+        "financial aid", "ragging", "anti-ragging", "faculty", "hod", "library",
+        "campus timing",
+        "સિલેબસ", "અભ્યાસક્રમ", "વિષય", "વિષયો", "સેમેસ્ટર", "ક્રેડિટ", "પરીક્ષા",
+        "હોસ્ટેલ", "મેસ", "નિયમ", "નિયમો", "સ્કોલરશિપ", "છાત્રાલય", "પુસ્તકાલય",
+        "सिलेबस", "पाठ्यक्रम", "विषय", "विषयों", "सेमेस्टर", "क्रेडिट", "परीक्षा",
+        "हॉस्टल", "मेस", "नियम", "स्कॉलरशिप", "छात्रवृत्ति", "छात्रावास", "पुस्तकालय",
+    ]
+    if any(k in lower for k in rag_keywords):
+        return True
+
+    return False
+
+
 STANDALONE_FILLER_PATTERNS = [
     r"^(?:sure,?\s*)?let me check(?:\s+that)?(?:\s+for you)?[.!?]*$",
     r"^(?:sure,?\s*)?let me look(?:\s+that)?(?:\s+up)?[.!?]*$",
@@ -194,6 +308,9 @@ def is_filler_phrase(text: str) -> bool:
     if not text:
         return False
     clean = text.strip()
+    # Explicitly protect mandatory hold phrases
+    if HOLD_PHRASE_REGEX.match(clean):
+        return False
     return any(r.match(clean) for r in COMPILED_FILLER_REGEX)
 
 

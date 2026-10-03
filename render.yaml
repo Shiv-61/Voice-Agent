@@ -11,7 +11,9 @@ services:
       - key: LLM_PROVIDER
         value: openrouter
       - key: LLM_MODEL
-        value: nvidia/nemotron-3-ultra-550b-a55b
+        value: qwen/qwen3.8-27b:free
+      - key: LLM_TEMPERATURE
+        value: "0.2"
       - key: STT_PROVIDER
         value: sarvam
       - key: TTS_SPEAKER

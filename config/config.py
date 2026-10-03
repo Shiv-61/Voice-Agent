@@ -54,7 +54,7 @@ GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completion
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 LLM_MODEL = os.getenv("LLM_MODEL", "sarvam-105b-conversations")
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "350"))                # more room for tool-call reasoning
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.4"))               # lower for factual accuracy
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))               # lower for factual accuracy
 
 # ---- Conversation ----
 MAX_HISTORY_TURNS = 8

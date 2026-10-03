@@ -13,13 +13,20 @@ import httpx
 import config
 from db.database import Database, transliterate_student_name
 from rag import RAGStore
-from utils import is_hangup_intent, clean_speech_text, is_prompt_leak
+from utils import (
+    is_hangup_intent,
+    clean_speech_text,
+    is_prompt_leak,
+    HOLD_PHRASES,
+    HOLD_PHRASE_REGEX,
+    query_needs_db_or_rag,
+    get_error_message,
+)
 from config.prompt_loader import (
     get_welcome_message,
     get_call_hangup_prompt,
     get_system_prompt,
     detect_active_domains,
-    get_fallback,
 )
 
 # Fix #11: Live-fetching wrappers instead of import-time frozen constants.
@@ -102,17 +109,25 @@ def expand_multilingual_query(text: str) -> str:
 
 # Fix #13: Pre-compiled frozensets compiled once at import time for O(1) per-turn intersection
 _GUJ_INDICATORS: frozenset[str] = frozenset({
-    "shu", "ketli", "ketla", "che", "chhe", "maate", "nathi", "aapo", "tame",
-    "tamara", "tamari", "tamaru", "aavde", "janavo", "kem", "vishe", "pucho",
-    "aabhar", "namaste", "gujarati", "kai", "kayi", "bhanela", "kaho", "mane",
-    "aapjo", "haji", "maru", "maro", "mari",
+    "shu", "ketli", "ketla", "ketlu", "che", "chhe", "maate", "nathi", "aapo",
+    "tame", "tamara", "tamari", "tamaru", "aavde", "janavo", "kem", "vishe",
+    "pucho", "aabhar", "namaste", "gujarati", "kai", "kayi", "bhanela", "kaho",
+    "mane", "aapjo", "haji", "maru", "maro", "mari", "mara", "mare", "dikro",
+    "dikra", "dikri", "chokro", "chokra", "chokri", "su", "chho", "chhu",
+    "karvanu", "karvo", "batavo", "aavshe", "karo", "joie", "joiye"
 })
+
 _HIN_INDICATORS: frozenset[str] = frozenset({
-    "kya", "kitna", "kitni", "hai", "hain", "batao", "bata", "sakate", "sakthi",
-    "sakthe", "hoga", "nahi", "kripya", "aapki", "aapka", "kaise", "kuch",
-    "baare", "mein", "aur", "chahiye", "dena", "kaun", "kaha", "kahan", "kab",
-    "hindi", "bataiye", "dijiye", "mujhe", "mera", "meri", "mere",
+    "kya", "kitna", "kitni", "kitne", "hai", "hain", "batao", "bata", "bataiye",
+    "sakate", "sakthi", "sakthe", "hoga", "hogi", "hoge", "nahi", "kripya",
+    "aapki", "aapka", "aapke", "kaise", "kuch", "baare", "mein", "aur", "chahiye",
+    "dena", "dijiye", "kaun", "kaha", "kahan", "kab", "hindi", "mujhe", "mera",
+    "meri", "mere", "uska", "uski", "uske", "unka", "unki", "unke", "beta", "beti",
+    "naam", "bolo", "boliye", "raha", "rahi", "rahe", "tha", "thi",
+    "iski", "iska", "iske", "inki", "inka", "inke", "hum", "humara", "humari",
+    "achha", "theek", "shukriya", "dhanyawad", "ki", "ka", "ke", "ko", "se", "toh"
 })
+
 _ENG_INDICATORS: frozenset[str] = frozenset({
     "what", "when", "where", "how", "why", "who", "which", "is", "are", "can",
     "tell", "eligibility", "fee", "fees", "admission", "curfew", "placement",
@@ -121,18 +136,32 @@ _ENG_INDICATORS: frozenset[str] = frozenset({
     "credit", "curriculum", "department", "hostel", "rules", "campus", "direct",
 })
 
+# Words that indicate Hindi even when phonetically written in Gujarati script
+_HINDI_IN_GUJ_WORDS: frozenset[str] = frozenset({
+    "બતાઓ", "બતાઈએ", "હૈ", "મેરા", "મેરી", "મેરે", "મુઝે", "ઉસકા", "ઉસકી", "ઉસકે",
+    "કિતની", "કિતના", "ચાહિયે", "ક્યા", "આપકા", "આપકી", "કૈસે", "નહીં", "હોગા", "હોગી",
+    "અભી", "કરકે", "બતાતી", "બતાતા", "કી", "કા", "કે"
+})
+
+_GUJ_SPECIFIC_WORDS: frozenset[str] = frozenset({
+    "છે", "નથી", "માટે", "તમાર", "કેમ", "શું", "આપો", "વિશે", "કહો", "જણાવો", "આવડે", "જોઈએ"
+})
+
 
 class LLM:
     def __init__(self, db=None, rag=None):
         self.db = db or get_shared_db()
         self.rag = rag or get_shared_rag()
         self.current_lang = "gu"  # Gujarati is the primary language
+        self.active_student_id: str | None = None
+        self.active_student_name: str | None = None
+        self._active_provider = config.LLM_PROVIDER
         # Initialize conversation history with the assistant's opening welcome message
         self.history: list[dict[str, str]] = [
             {"role": "assistant", "content": WELCOME_MESSAGE}
         ]
 
-    def detect_turn_language(self, text: str, fallback_lang: str = "gu") -> tuple[str, str, str]:
+    def detect_turn_language(self, text: str, fallback_lang: str = "gu", stt_lang: str | None = None) -> tuple[str, str, str]:
         """
         Determines caller language for the active turn with zero-latency dynamic switching.
         Hierarchy:
@@ -145,77 +174,189 @@ class LLM:
         words = set(re.findall(r'\b[a-zA-Z]+\b', lower))
 
         # 1. Native script detection (100% definitive)
-        if re.search(r"[\u0a80-\u0aff]", clean):
-            return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
         if re.search(r"[\u0900-\u097f]", clean):
-            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी). Do NOT use Gujarati or English.]:\n"
+            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
 
-        # Fix #13: use pre-compiled frozensets (module-level) for O(1) word lookup per language
-        guj_overlap = len(words & _GUJ_INDICATORS)
-        hin_overlap = len(words & _HIN_INDICATORS)
-        eng_overlap = len(words & _ENG_INDICATORS)
+        if re.search(r"[\u0a80-\u0aff]", clean):
+            # Check if text actually consists of Hindi words phonetically transcribed in Gujarati script
+            has_hin_words = any(hw in clean for hw in _HINDI_IN_GUJ_WORDS)
+            has_guj_words = any(gw in clean for gw in _GUJ_SPECIFIC_WORDS)
+            if has_hin_words and not has_guj_words:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
+            return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
 
         # Explicit language request triggers
         if "gujarati" in words:
             return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી).]:\n"
         if "hindi" in words:
             return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी).]:\n"
-        if "english" in words and guj_overlap == 0 and hin_overlap == 0:
+        if "english" in words and not (words & _GUJ_INDICATORS) and not (words & _HIN_INDICATORS):
             return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
 
-        # High-confidence distinctive vocabulary
-        if any(w in words for w in ["chhe", "nathi", "tamari", "kem", "maate", "aavde", "aapjo"]):
-            return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી).]:\n"
-        if any(w in words for w in ["batao", "kripya", "aapka", "aapki", "kaise", "chahiye", "bataiye"]):
-            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी).]:\n"
+        guj_overlap = len(words & _GUJ_INDICATORS)
+        hin_overlap = len(words & _HIN_INDICATORS)
+        eng_overlap = len(words & _ENG_INDICATORS)
 
         # Multi-word overlap evaluation
-        if guj_overlap >= 2 and guj_overlap >= hin_overlap:
-            return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી).]:\n"
-        if hin_overlap >= 2:
-            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी).]:\n"
-        if eng_overlap >= 1 and guj_overlap == 0 and hin_overlap == 0:
+        if hin_overlap > 0 and hin_overlap >= guj_overlap and hin_overlap >= eng_overlap:
+            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
+        if guj_overlap > 0 and guj_overlap >= hin_overlap and guj_overlap >= eng_overlap:
+            return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
+        if eng_overlap > 0 and eng_overlap >= hin_overlap and eng_overlap >= guj_overlap:
             return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
+
+        # Check acoustic STT language hint for neutral queries (e.g. 'Aarav Patel', 'STU1')
+        if stt_lang:
+            stt_l = stt_lang.lower()
+            if "hi" in stt_l:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
+            elif "en" in stt_l:
+                return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
+            elif "gu" in stt_l:
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
 
         # Neutral query (e.g. 'STU101' or numbers) -> retain session active language, fallback to Gujarati (Primary)
         fb = (fallback_lang or "").lower()
         if "hi" in fb:
-            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Continue in active conversation language: HINDI (हिंदी लिपि).]:\n"
+            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Continue in active conversation language: HINDI (हिंदी लिपि). Every single word must be in Hindi.]:\n"
         elif "en" in fb:
             return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Continue in active conversation language: ENGLISH.]:\n"
         else:
             return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Respond in primary language: GUJARATI (ગુજરાતી લિપિ).]:\n"
 
-    def _prepare_messages(self, user_text: str) -> list[dict[str, str]]:
+    def _prepare_messages(self, user_text: str, stt_lang: str | None = None) -> list[dict[str, str]]:
         """
         Prepares LLM messages with conversation history and anticipatory RAG / DB context.
         Pre-retrieval eliminates the slow, redundant 2nd turn LLM tool round-trip!
         """
         clean_user_text = transform_query(user_text)
+        lower_text = clean_user_text.lower()
         history_context = self._format_conversation_history()
 
         context_snippets = []
 
-        # 1. Anticipatory RAG query with multilingual semantic expansion
-        try:
-            rag_query = expand_multilingual_query(clean_user_text)
-            matches = self.rag.query_documents(rag_query, n_results=4)
-            if matches and matches[0].get("similarity_score", 0) >= 0.50:
-                for m in matches:
-                    text_snippet = m.get("text", "").strip()
-                    if text_snippet:
-                        # Strip non-printable / private unicode symbols (e.g. font-icon glyphs)
-                        text_snippet = re.sub(r'[^\x20-\x7E\u0900-\u097F\u0A80-\u0AFF\n\r\t]', ' ', text_snippet)
-                        text_snippet = re.sub(r'\s+', ' ', text_snippet).strip()
-                        filename = m.get("metadata", {}).get("filename", "University Document")
-                        page_num = m.get("metadata", {}).get("page", 1)
-                        context_snippets.append(f"[Official Document: {filename} (Page {page_num})]: {text_snippet[:1200]}")
-        except Exception as e:
-            print(f"[llm] Anticipatory RAG notice: {e}")
+        # Detect if caller is inquiring about an individual student's records (attendance, marks, cpi, etc.)
+        ATTENDANCE_TERMS = {
+            "attendance", "attedance", "atendance", "attandance", "attendence",
+            "હાજરી", "એટેન્ડન્સ", "અટેન્ડન્સ", "अटेंडेंस", "उपस्थिति"
+        }
+        MARKS_TERMS = {
+            "marks", "mark", "cpi", "cgpa", "spi", "result", "grade", "score",
+            "માર્ક્સ", "માર્ક", "પરિણામ", "સીપીઆઈ", "ગુણ",
+            "मार्क्स", "अंक", "रिजल्ट", "परिणाम", "सीपीआई"
+        }
+        STUDENT_INTENT_TERMS = {
+            "son", "daughter", "child", "kid", "beta", "beti", "bachha", "baccha",
+            "dikro", "dikra", "dikri", "chokro", "chokra", "chokri",
+            "maro", "mari", "maru", "mara", "mare",
+            "mera", "meri", "mere", "my", "his", "her", "student", "roll",
+            "દીકર", "છોકર", "પુત્ર", "માર", "તમાર", "વિદ્યાર્થી", "બાળક",
+            "बेट", "बच्च", "पुत्र", "मेर", "छात्र", "विद्यार्थी", "रोल"
+        }
+        GENERAL_POLICY_TERMS = {
+            "rule", "rules", "policy", "policies", "criteria", "requirement", "requirements",
+            "minimum", "mandatory", "compulsory", "allowed", "regulation", "regulations",
+            "નિયમ", "નિયમો", "પોલિસી", "શરત", "જરૂરી", "ઓછામાં ઓછી",
+            "नियम", "पॉलिसी", "शर्त", "जरूरी", "न्यूनतम", "अनिवार्य"
+        }
+
+        has_rec_term = any(t in lower_text for t in ATTENDANCE_TERMS | MARKS_TERMS)
+        has_student_intent = any(t in lower_text for t in STUDENT_INTENT_TERMS)
+        has_policy_term = any(t in lower_text for t in GENERAL_POLICY_TERMS)
+
+        # Distinguish personal record request vs general university policy inquiry:
+        # Any attendance/marks/result query without policy keywords is treated as a personal record query.
+        is_personal_student_query = (has_rec_term and not has_policy_term) or (
+            has_student_intent and has_rec_term
+        )
+
+        # 1. Student ID or Name pattern resolution
+        student = None
+        stu_match = re.search(
+            r'\b(?:stu\s*(\d{1,4})|student\s*(\d{1,4})|(stu\d{1,4}|2[0-9]it\d{2,4}|it\d{2,4}|ce\d{2,4}|ec\d{2,4}))\b',
+            lower_text, re.IGNORECASE
+        )
+        if stu_match:
+            matched_num = stu_match.group(1) or stu_match.group(2)
+            if matched_num:
+                stu_id = f"STU{matched_num}"
+            else:
+                stu_id = stu_match.group(3).upper().replace(" ", "")
+            student = self.db.lookup_student(stu_id)
+        else:
+            try:
+                all_students = self.db.get_all_student_identifiers()
+                clean_query_trans = transliterate_student_name(clean_user_text).lower()
+                query_tokens = set(re.findall(r'\b[a-zA-Z]+\b', lower_text)) | set(re.findall(r'\b[a-zA-Z]+\b', clean_query_trans))
+
+                for s_item in all_students:
+                    s_name = s_item.get("name", "").lower()
+                    s_id = s_item.get("student_id", "").lower()
+                    parts = s_name.split()
+                    first_name = parts[0] if parts else ""
+
+                    # Full name or exact ID in text
+                    if s_name and (s_name in lower_text or s_name in clean_query_trans or s_id in lower_text):
+                        student = self.db.lookup_student(s_item["student_id"])
+                        break
+                    # First name match (protect 'priya' assistant name unless qualified as student)
+                    elif first_name and len(first_name) >= 3 and first_name in query_tokens:
+                        if first_name == "priya":
+                            if any(k in lower_text for k in ["student", "daughter", "beti", "dikri", "stu4"]):
+                                student = self.db.lookup_student(s_item["student_id"])
+                                break
+                        else:
+                            student = self.db.lookup_student(s_item["student_id"])
+                            break
+            except Exception as de:
+                print(f"[llm] Dynamic student search notice: {de}")
+
+        # Check session active_student_id if student not explicitly found in current turn
+        if not student and self.active_student_id:
+            try:
+                if has_rec_term or has_student_intent or any(w in lower_text for w in ["he", "him", "his", "તે", "તેનું", "વહ"]):
+                    student = self.db.lookup_student(self.active_student_id)
+            except Exception as se:
+                print(f"[llm] Active student lookup notice: {se}")
+
+        # Fallback: scan recent turns of conversation history for any student ID or name
+        if not student and (has_rec_term or has_student_intent):
+            try:
+                all_students = self.db.get_all_student_identifiers()
+                for turn in reversed(self.history[-4:]):
+                    h_text = turn.get("content", "").lower()
+                    h_match = re.search(r'\b(?:stu\s*(\d{1,4})|(stu\d{1,4}))\b', h_text)
+                    if h_match:
+                        h_id = f"STU{h_match.group(1)}" if h_match.group(1) else h_match.group(2).upper()
+                        student = self.db.lookup_student(h_id)
+                        if student:
+                            break
+                    for s_item in all_students:
+                        s_name = s_item.get("name", "").lower()
+                        if s_name and s_name in h_text:
+                            student = self.db.lookup_student(s_item["student_id"])
+                            if student:
+                                break
+                    if student:
+                        break
+            except Exception as he:
+                print(f"[llm] History student scan notice: {he}")
+
+        # If student is resolved, remember in session and retrieve personal records
+        if student:
+            stu_id = student.get("student_id")
+            self.active_student_id = stu_id
+            self.active_student_name = student.get("name")
+            context_snippets.append(f"[Student Record {stu_id}]: {json.dumps(student, default=str)}")
+            marks = self.db.get_student_marks(stu_id)
+            if marks:
+                context_snippets.append(f"[Student Marks {stu_id}]: {json.dumps(marks, default=str)}")
+            att = self.db.get_student_attendance(stu_id)
+            if att:
+                context_snippets.append(f"[Student Attendance {stu_id}]: {json.dumps(att, default=str)}")
 
         # 2. Anticipatory DB check for admission or placement (English, Hindi, Gujarati)
         try:
-            lower_text = clean_user_text.lower()
             if any(k in lower_text for k in [
                 "placement", "package", "recruiter", "salary", "placed",
                 "प्लेसमेंट", "नौकरी", "पैकेज", "सैलरी", "પ્લેસમેન્ટ"
@@ -235,37 +376,30 @@ class LLM:
                 adm = self.db.get_admission_info(prog)
                 if adm:
                     context_snippets.append(f"[Official Admission & Fee Records]: {json.dumps(adm, default=str)}")
-
-            # Student ID or Name pattern (supports English, Hindi, and Gujarati)
-            student = None
-            stu_match = re.search(r'\b(stu\d{2,4}|2[0-9]it\d{2,4}|it\d{2,4}|ce\d{2,4}|ec\d{2,4})\b', lower_text, re.IGNORECASE)
-            if stu_match:
-                stu_id = stu_match.group(1).upper()
-                student = self.db.lookup_student(stu_id)
-            else:
-                try:
-                    all_students = self.db.get_all_student_identifiers()
-                    clean_query_trans = transliterate_student_name(clean_user_text).lower()
-                    for s_item in all_students:
-                        s_name = s_item.get("name", "").lower()
-                        s_id = s_item.get("student_id", "").lower()
-                        if s_name and (s_name in lower_text or s_name in clean_query_trans or s_id in lower_text):
-                            student = self.db.lookup_student(s_item["student_id"])
-                            break
-                except Exception as de:
-                    print(f"[llm] Dynamic student search notice: {de}")
-
-            if student:
-                stu_id = student.get("student_id")
-                context_snippets.append(f"[Student Record {stu_id}]: {json.dumps(student, default=str)}")
-                marks = self.db.get_student_marks(stu_id)
-                if marks:
-                    context_snippets.append(f"[Student Marks {stu_id}]: {json.dumps(marks, default=str)}")
-                att = self.db.get_student_attendance(stu_id)
-                if att:
-                    context_snippets.append(f"[Student Attendance {stu_id}]: {json.dumps(att, default=str)}")
         except Exception as e:
             print(f"[llm] Anticipatory DB notice: {e}")
+
+        # 3. Anticipatory RAG query (suppressed for un-identified personal student queries)
+        matches = []
+        if not (is_personal_student_query and not student):
+            try:
+                rag_query = expand_multilingual_query(clean_user_text)
+                matches = self.rag.query_documents(rag_query, n_results=4)
+                if matches and matches[0].get("similarity_score", 0) >= 0.50:
+                    for m in matches:
+                        text_snippet = m.get("text", "").strip()
+                        if text_snippet:
+                            text_snippet = re.sub(r'[^\x20-\x7E\u0900-\u097F\u0A80-\u0AFF\n\r\t]', ' ', text_snippet)
+                            text_snippet = re.sub(r'\s+', ' ', text_snippet).strip()
+                            filename = m.get("metadata", {}).get("filename", "University Document")
+                            page_num = m.get("metadata", {}).get("page", 1)
+                            context_snippets.append(f"[Official Document: {filename} (Page {page_num})]: {text_snippet[:1200]}")
+            except Exception as e:
+                print(f"[llm] Anticipatory RAG notice: {e}")
+
+        # Check whether this turn has actual university records / document context to serve
+        has_db_or_rag = bool(context_snippets)
+        self._last_turn_needed_db_or_rag = has_db_or_rag
 
         rag_context = ""
         if context_snippets:
@@ -286,12 +420,26 @@ class LLM:
             messages.append({"role": turn["role"], "content": turn["content"]})
 
         # Dynamically detect caller's active turn language (Gujarati primary, Hindi/English secondary)
-        lang_code, bcp47, lang_cue = self.detect_turn_language(clean_user_text, self.current_lang)
+        lang_code, bcp47, lang_cue = self.detect_turn_language(clean_user_text, self.current_lang, stt_lang=stt_lang)
         self.current_lang = lang_code
 
-        current_turn_content = f"{lang_cue}{clean_user_text}"
+        hold_phrase = HOLD_PHRASES.get(lang_code, HOLD_PHRASES["gu"])
+        hold_directive = ""
+        if has_db_or_rag:
+            hold_directive = (
+                f"[MANDATORY OPENING: You are retrieving information from university database/documents. "
+                f"Start your spoken answer with: \"{hold_phrase}\" followed by the facts.]\n"
+            )
+        elif is_personal_student_query and not student:
+            hold_directive = (
+                "[DIRECTIVE: Caller is inquiring about an individual student's records (attendance or marks), but NO Student ID or registered name has been provided yet. "
+                "Politely ask the caller to provide their son's or student's Student ID (e.g. STU1) or registered name. "
+                "Do NOT output any hold phrase or filler.]\n"
+            )
+
+        current_turn_content = f"{hold_directive}{lang_cue}{clean_user_text}"
         if rag_context:
-            current_turn_content = f"{rag_context}\n{lang_cue}{clean_user_text}"
+            current_turn_content = f"{rag_context}\n{hold_directive}{lang_cue}{clean_user_text}"
 
         messages.append({"role": "user", "content": current_turn_content})
 
@@ -391,14 +539,15 @@ class LLM:
         """
         return is_hangup_intent(user_text)
 
-    def _get_provider_request(self, messages: list[dict]):
+    def _get_provider_request(self, messages: list[dict], provider_override: str | None = None):
         """Builds URL, headers, and payload for streaming LLM calls."""
-        if config.LLM_PROVIDER == "sarvam":
+        provider = provider_override or getattr(self, "_active_provider", config.LLM_PROVIDER)
+        if provider == "sarvam":
             headers = {
                 "api-subscription-key": config.SARVAM_API_KEY.strip(),
                 "Content-Type": "application/json",
             }
-            sarvam_model = config.LLM_MODEL if config.LLM_MODEL and "sarvam" in config.LLM_MODEL else "sarvam-105b-conversations"
+            sarvam_model = "sarvam-105b-conversations"
             payload = {
                 "model": sarvam_model,
                 "messages": messages,
@@ -407,7 +556,7 @@ class LLM:
                 "stream": True,
             }
             return config.SARVAM_CHAT_URL, headers, payload
-        elif config.LLM_PROVIDER == "groq":
+        elif provider == "groq":
             headers = {
                 "Authorization": f"Bearer {config.GROQ_API_KEY.strip()}",
                 "Content-Type": "application/json",
@@ -421,7 +570,7 @@ class LLM:
                 "stream": True,
             }
             return config.GROQ_URL, headers, payload
-        elif config.LLM_PROVIDER == "openrouter":
+        elif provider == "openrouter":
             headers = {
                 "Authorization": f"Bearer {config.OPENROUTER_API_KEY.strip()}",
                 "Content-Type": "application/json",
@@ -434,6 +583,8 @@ class LLM:
                 "temperature": config.LLM_TEMPERATURE,
                 "max_tokens": config.LLM_MAX_TOKENS,
                 "stream": True,
+                "include_reasoning": False,
+                "reasoning": {"effort": "none"},
             }
             return config.OPENROUTER_URL, headers, payload
         else:
@@ -449,12 +600,13 @@ class LLM:
             }
             return config.OLLAMA_URL, headers, payload
 
-    def _parse_stream_line(self, line: str) -> str:
+    def _parse_stream_line(self, line: str, provider_override: str | None = None) -> str:
         """Extracts delta token text from SSE or JSON line."""
         line = line.strip()
         if not line:
             return ""
-        if config.LLM_PROVIDER in ("sarvam", "openrouter", "groq"):
+        provider = provider_override or getattr(self, "_active_provider", config.LLM_PROVIDER)
+        if provider in ("sarvam", "openrouter", "groq"):
             if line.startswith("data:"):
                 data_str = line[5:].strip()
                 if not data_str or data_str == "[DONE]":
@@ -476,12 +628,20 @@ class LLM:
                 return ""
         return ""
 
-    def reply_stream(self, user_text: str) -> Generator[str, None, None]:
+    def reply_stream(self, user_text: str, stt_lang: str | None = None) -> Generator[str, None, None]:
         """
         Synchronously yields response tokens incrementally in real time.
         Used by CLI and synchronous callers.
         """
-        messages = self._prepare_messages(user_text)
+        messages = self._prepare_messages(user_text, stt_lang=stt_lang)
+        turn_lang = self.current_lang
+        needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
+        hold_phrase = HOLD_PHRASES.get(turn_lang, HOLD_PHRASES["gu"])
+        hold_phrase_yielded = False
+
+        if needs_hold:
+            yield f"{hold_phrase} "
+            hold_phrase_yielded = True
 
         max_tool_iterations = 3
         current_iteration = 0
@@ -498,21 +658,41 @@ class LLM:
                     is_streaming_speech = False
                     full_reply = ""
                     in_think = False
+                    checked_hold_dedup = not hold_phrase_yielded
 
                     with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        if resp.status_code == 429 and getattr(self, "_active_provider", config.LLM_PROVIDER) == "openrouter" and config.SARVAM_API_KEY:
+                            print("⚠️ [llm] OpenRouter quota/rate limit (429) hit. Gracefully switching to Sarvam LLM (sarvam-105b-conversations)...")
+                            self._active_provider = "sarvam"
+                            current_iteration -= 1
+                            continue
                         resp.raise_for_status()
                         for line in resp.iter_lines():
                             token = self._parse_stream_line(line)
                             if not token:
                                 continue
 
-                            # Filter thinking reasoning tokens (<think>...</think>)
-                            if "<think>" in token:
-                                in_think = True
+                            # Filter thinking reasoning tokens (<think>...</think> or <thought>...</thought>)
                             if in_think:
                                 if "</think>" in token:
                                     in_think = False
-                                continue
+                                    token = token.split("</think>", 1)[1]
+                                    if not token:
+                                        continue
+                                elif "</thought>" in token:
+                                    in_think = False
+                                    token = token.split("</thought>", 1)[1]
+                                    if not token:
+                                        continue
+                                else:
+                                    continue
+
+                            if "<think>" in token or "<thought>" in token:
+                                in_think = True
+                                tag = "<think>" if "<think>" in token else "<thought>"
+                                token = token.split(tag, 1)[0]
+                                if not token:
+                                    continue
 
                             # Detect whether model is issuing a tool call with sliding lookback window
                             recent_window = (recent_window + token)[-30:]
@@ -524,15 +704,23 @@ class LLM:
                                     is_tool_call = True
                                 elif "TOOL_CALL:".startswith(stripped):
                                     continue
-                                elif len(stripped) >= 12 and "TOOL_CALL:" not in stream_buffer:
-                                    if is_prompt_leak(stream_buffer):
-                                        print(f"🛑 [llm] Suppressed prompt leak buffer in stream: {stream_buffer}")
-                                        stream_buffer = ""
-                                        continue
-                                    is_streaming_speech = True
-                                    yield stream_buffer
-                                    full_reply += stream_buffer
-                                    stream_buffer = ""
+                                else:
+                                    has_punct = any(p in stream_buffer for p in [".", "!", "?", "।", "\n"])
+                                    min_len = 35 if hold_phrase_yielded and not checked_hold_dedup else 12
+                                    if (has_punct or len(stripped) >= min_len) and "TOOL_CALL:" not in stream_buffer:
+                                        if hold_phrase_yielded and not checked_hold_dedup:
+                                            checked_hold_dedup = True
+                                            if HOLD_PHRASE_REGEX.match(stripped):
+                                                stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
+                                        if is_prompt_leak(stream_buffer):
+                                            print(f"🛑 [llm] Suppressed prompt leak buffer in stream: {stream_buffer}")
+                                            stream_buffer = ""
+                                            continue
+                                        if stream_buffer:
+                                            is_streaming_speech = True
+                                            yield stream_buffer
+                                            full_reply += stream_buffer
+                                            stream_buffer = ""
                                 continue
 
                             if is_tool_call:
@@ -557,17 +745,25 @@ class LLM:
 
                     # If remaining buffer wasn't flushed for short responses
                     if stream_buffer and not is_tool_call:
-                        if not is_prompt_leak(stream_buffer):
+                        if hold_phrase_yielded and not checked_hold_dedup:
+                            checked_hold_dedup = True
+                            stripped = stream_buffer.lstrip()
+                            if HOLD_PHRASE_REGEX.match(stripped):
+                                stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
+                        if stream_buffer and not is_prompt_leak(stream_buffer):
                             full_reply += stream_buffer
                             yield stream_buffer
                         stream_buffer = ""
 
                     if is_tool_call:
+                        if not hold_phrase_yielded:
+                            yield f"{hold_phrase} "
+                            hold_phrase_yielded = True
                         tool_info = self._parse_tool_call(stream_buffer)
                         if tool_info:
                             tool_name, kwargs = tool_info
                             tool_result = self._execute_tool(tool_name, kwargs)
-                            tool_synth = get_fallback("tool_synthesis_suffix", "Please synthesize a short, polite spoken answer for the caller in 1-2 sentences.")
+                            tool_synth = f"Please synthesize a short, polite spoken answer for the caller in 1-2 sentences in {turn_lang} language."
                             messages.append({"role": "assistant", "content": stream_buffer})
                             messages.append({
                                 "role": "user",
@@ -579,7 +775,10 @@ class LLM:
                             clean_text = clean_speech_text(stream_buffer)
                             if is_prompt_leak(clean_text):
                                 clean_text = "I am here to help you with DDU IT queries. How may I assist you?"
-                            self.history.append({"role": "assistant", "content": clean_text})
+                            clean_history_text = clean_text
+                            if hold_phrase_yielded and not clean_history_text.startswith(hold_phrase):
+                                clean_history_text = f"{hold_phrase} {clean_history_text}"
+                            self.history.append({"role": "assistant", "content": clean_history_text})
                             yield clean_text
                             return
                     else:
@@ -621,25 +820,42 @@ class LLM:
                                     clean_text = "Hello, I am Priya from DDU IT department. How may I assist you with admissions, curriculum, or student records?"
                             yield clean_text
 
-                        self.history.append({"role": "assistant", "content": clean_text})
+                        clean_history_text = clean_text
+                        if hold_phrase_yielded and not clean_history_text.startswith(hold_phrase):
+                            clean_history_text = f"{hold_phrase} {clean_history_text}"
+                        self.history.append({"role": "assistant", "content": clean_history_text})
                         return
 
             fallback = "I have fetched the information. How else may I assist you with university admissions?"
-            self.history.append({"role": "assistant", "content": fallback})
+            clean_fallback = fallback
+            if hold_phrase_yielded and not clean_fallback.startswith(hold_phrase):
+                clean_fallback = f"{hold_phrase} {clean_fallback}"
+            self.history.append({"role": "assistant", "content": clean_fallback})
             yield fallback
 
         except Exception as err:
             print(f"[llm] Error communicating with {config.LLM_PROVIDER}: {err}")
-            fallback_msg = "I am sorry, I am having trouble accessing the university system at this moment. Please try again shortly."
-            self.history.append({"role": "assistant", "content": fallback_msg})
+            fallback_msg = get_error_message("system_error", turn_lang) or "I am sorry, I am having trouble accessing the university system at this moment. Please try again shortly."
+            clean_fallback = fallback_msg
+            if hold_phrase_yielded and not clean_fallback.startswith(hold_phrase):
+                clean_fallback = f"{hold_phrase} {clean_fallback}"
+            self.history.append({"role": "assistant", "content": clean_fallback})
             yield fallback_msg
 
-    async def areply_stream(self, user_text: str) -> AsyncGenerator[str, None]:
+    async def areply_stream(self, user_text: str, stt_lang: str | None = None) -> AsyncGenerator[str, None]:
         """
         Asynchronously yields response tokens incrementally in real time.
         Zero event-loop blocking for FastAPI and WebSocket servers.
         """
-        messages = self._prepare_messages(user_text)
+        messages = self._prepare_messages(user_text, stt_lang=stt_lang)
+        turn_lang = self.current_lang
+        needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
+        hold_phrase = HOLD_PHRASES.get(turn_lang, HOLD_PHRASES["gu"])
+        hold_phrase_yielded = False
+
+        if needs_hold:
+            yield f"{hold_phrase} "
+            hold_phrase_yielded = True
 
         max_tool_iterations = 3
         current_iteration = 0
@@ -656,21 +872,41 @@ class LLM:
                     is_streaming_speech = False
                     full_reply = ""
                     in_think = False
+                    checked_hold_dedup = not hold_phrase_yielded
 
                     async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        if resp.status_code == 429 and getattr(self, "_active_provider", config.LLM_PROVIDER) == "openrouter" and config.SARVAM_API_KEY:
+                            print("⚠️ [llm] OpenRouter quota/rate limit (429) hit. Gracefully switching to Sarvam LLM (sarvam-105b-conversations)...")
+                            self._active_provider = "sarvam"
+                            current_iteration -= 1
+                            continue
                         resp.raise_for_status()
                         async for line in resp.aiter_lines():
                             token = self._parse_stream_line(line)
                             if not token:
                                 continue
 
-                            # Filter thinking reasoning tokens (<think>...</think>)
-                            if "<think>" in token:
-                                in_think = True
+                            # Filter thinking reasoning tokens (<think>...</think> or <thought>...</thought>)
                             if in_think:
                                 if "</think>" in token:
                                     in_think = False
-                                continue
+                                    token = token.split("</think>", 1)[1]
+                                    if not token:
+                                        continue
+                                elif "</thought>" in token:
+                                    in_think = False
+                                    token = token.split("</thought>", 1)[1]
+                                    if not token:
+                                        continue
+                                else:
+                                    continue
+
+                            if "<think>" in token or "<thought>" in token:
+                                in_think = True
+                                tag = "<think>" if "<think>" in token else "<thought>"
+                                token = token.split(tag, 1)[0]
+                                if not token:
+                                    continue
 
                             # Detect whether model is issuing a tool call with sliding lookback window
                             recent_window = (recent_window + token)[-30:]
@@ -682,15 +918,23 @@ class LLM:
                                     is_tool_call = True
                                 elif "TOOL_CALL:".startswith(stripped):
                                     continue
-                                elif len(stripped) >= 12 and "TOOL_CALL:" not in stream_buffer:
-                                    if is_prompt_leak(stream_buffer):
-                                        print(f"🛑 [llm] Suppressed prompt leak buffer in async stream: {stream_buffer}")
-                                        stream_buffer = ""
-                                        continue
-                                    is_streaming_speech = True
-                                    yield stream_buffer
-                                    full_reply += stream_buffer
-                                    stream_buffer = ""
+                                else:
+                                    has_punct = any(p in stream_buffer for p in [".", "!", "?", "।", "\n"])
+                                    min_len = 35 if hold_phrase_yielded and not checked_hold_dedup else 12
+                                    if (has_punct or len(stripped) >= min_len) and "TOOL_CALL:" not in stream_buffer:
+                                        if hold_phrase_yielded and not checked_hold_dedup:
+                                            checked_hold_dedup = True
+                                            if HOLD_PHRASE_REGEX.match(stripped):
+                                                stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
+                                        if is_prompt_leak(stream_buffer):
+                                            print(f"🛑 [llm] Suppressed prompt leak buffer in async stream: {stream_buffer}")
+                                            stream_buffer = ""
+                                            continue
+                                        if stream_buffer:
+                                            is_streaming_speech = True
+                                            yield stream_buffer
+                                            full_reply += stream_buffer
+                                            stream_buffer = ""
                                 continue
 
                             if is_tool_call:
@@ -715,18 +959,26 @@ class LLM:
 
                     # If remaining buffer wasn't flushed for short responses
                     if stream_buffer and not is_tool_call:
-                        if not is_prompt_leak(stream_buffer):
+                        if hold_phrase_yielded and not checked_hold_dedup:
+                            checked_hold_dedup = True
+                            stripped = stream_buffer.lstrip()
+                            if HOLD_PHRASE_REGEX.match(stripped):
+                                stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
+                        if stream_buffer and not is_prompt_leak(stream_buffer):
                             full_reply += stream_buffer
                             yield stream_buffer
                         stream_buffer = ""
 
                     if is_tool_call:
+                        if not hold_phrase_yielded:
+                            yield f"{hold_phrase} "
+                            hold_phrase_yielded = True
                         tool_info = self._parse_tool_call(stream_buffer)
                         if tool_info:
                             tool_name, kwargs = tool_info
                             # Run tool in worker thread if blocking
                             tool_result = await asyncio.to_thread(self._execute_tool, tool_name, kwargs)
-                            tool_synth = get_fallback("tool_synthesis_suffix", "Please synthesize a short, polite spoken answer for the caller in 1-2 sentences.")
+                            tool_synth = f"Please synthesize a short, polite spoken answer for the caller in 1-2 sentences in {turn_lang} language."
                             messages.append({"role": "assistant", "content": stream_buffer})
                             messages.append({
                                 "role": "user",
@@ -737,7 +989,10 @@ class LLM:
                             clean_text = clean_speech_text(stream_buffer)
                             if is_prompt_leak(clean_text):
                                 clean_text = "I am here to help you with DDU IT queries. How may I assist you?"
-                            self.history.append({"role": "assistant", "content": clean_text})
+                            clean_history_text = clean_text
+                            if hold_phrase_yielded and not clean_history_text.startswith(hold_phrase):
+                                clean_history_text = f"{hold_phrase} {clean_history_text}"
+                            self.history.append({"role": "assistant", "content": clean_history_text})
                             yield clean_text
                             return
                     else:
@@ -779,11 +1034,17 @@ class LLM:
                                     clean_text = "Hello, I am Priya from DDU IT department. How may I assist you with admissions, curriculum, or student records?"
                             yield clean_text
 
-                        self.history.append({"role": "assistant", "content": clean_text})
+                        clean_history_text = clean_text
+                        if hold_phrase_yielded and not clean_history_text.startswith(hold_phrase):
+                            clean_history_text = f"{hold_phrase} {clean_history_text}"
+                        self.history.append({"role": "assistant", "content": clean_history_text})
                         return
 
             fallback = "I have fetched the information. How else may I assist you with university admissions?"
-            self.history.append({"role": "assistant", "content": fallback})
+            clean_fallback = fallback
+            if hold_phrase_yielded and not clean_fallback.startswith(hold_phrase):
+                clean_fallback = f"{hold_phrase} {clean_fallback}"
+            self.history.append({"role": "assistant", "content": clean_fallback})
             yield fallback
 
         except (asyncio.CancelledError, GeneratorExit):
@@ -793,6 +1054,9 @@ class LLM:
             raise
         except Exception as err:
             print(f"[llm] Async communication error with {config.LLM_PROVIDER}: {err}")
-            fallback_msg = get_fallback("system_error", "I am sorry, I am having trouble accessing the university system at this moment. Please try again shortly.")
-            self.history.append({"role": "assistant", "content": fallback_msg})
+            fallback_msg = get_error_message("system_error", turn_lang) or "I am sorry, I am having trouble accessing the university system at this moment. Please try again shortly."
+            clean_fallback = fallback_msg
+            if hold_phrase_yielded and not clean_fallback.startswith(hold_phrase):
+                clean_fallback = f"{hold_phrase} {clean_fallback}"
+            self.history.append({"role": "assistant", "content": clean_fallback})
             yield fallback_msg

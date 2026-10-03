@@ -89,7 +89,8 @@ def run_cli_mode():
                     print("(didn't catch any words, please try again)")
                     continue
 
-            current_language = detected_lang or current_language
+            turn_lang, bcp47, _ = llm.detect_turn_language(user_text, detected_lang)
+            current_language = bcp47
             print(f"\n🧑 User [{current_language}]: {user_text}")
 
             # Check call hangup prompt ({call_hangup: true/false})
@@ -98,7 +99,7 @@ def run_cli_mode():
             print("🤖 Agent: ", end="", flush=True)
 
             buffer = ""
-            for piece in llm.reply_stream(user_text):
+            for piece in llm.reply_stream(user_text, stt_lang=detected_lang):
                 print(piece, end="", flush=True)
                 buffer += piece
                 ready_sentences, buffer = split_ready_sentences(buffer)

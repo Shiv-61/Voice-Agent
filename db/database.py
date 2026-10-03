@@ -19,18 +19,27 @@ except ImportError:
 
 
 INDIC_NAME_MAP = {
-    # Gujarati
-    "આરવ": "Aarav", "પટેલ": "Patel",
-    "રાજ": "Raj", "મહેતા": "Mehta",
-    "રિયા": "Riya", "શર્મા": "Sharma",
-    "દેવ": "Dev", "શાહ": "Shah",
-    "પ્રિયા": "Priya",
-    # Hindi
-    "आरव": "Aarav", "पटेल": "Patel",
-    "राज": "Raj", "मेहता": "Mehta",
-    "रिया": "Riya", "शर्मा": "Sharma",
-    "देव": "Dev", "शाह": "Shah",
-    "प्रिया": "Priya",
+    # Gujarati First Names
+    "આરવ": "Aarav", "રિયા": "Riya", "અર્જુન": "Arjun", "પ્રિયા": "Priya",
+    "રાહુલ": "Rahul", "સ્નેહા": "Sneha", "કરણ": "Karan", "અનન્યા": "Ananya",
+    "વિવેક": "Vivek", "નેહા": "Neha", "આદિત્ય": "Aditya", "ઇશા": "Isha", "ઈશા": "Isha",
+    "રોહન": "Rohan", "કાવ્યા": "Kavya", "માનવ": "Manav", "પૂજા": "Pooja",
+    "ધ્રુવ": "Dhruv", "મીરા": "Meera", "યશ": "Yash", "સિમરન": "Simran",
+    # Gujarati Surnames
+    "પટેલ": "Patel", "શાહ": "Shah", "મહેતા": "Mehta", "દેસાઈ": "Desai",
+    "જોશી": "Joshi", "કુમાર": "Kumar",
+    # Hindi First Names
+    "आरव": "Aarav", "रिया": "Riya", "अर्जुन": "Arjun", "प्रिया": "Priya",
+    "राहुल": "Rahul", "स्नेहा": "Sneha", "करण": "Karan", "अनन्या": "Ananya",
+    "विवेक": "Vivek", "नेहा": "Neha", "आदित्य": "Aditya", "ईशा": "Isha", "इशा": "Isha",
+    "रोहन": "Rohan", "काव्या": "Kavya", "मानव": "Manav", "पूजा": "Pooja",
+    "ध्रुव": "Dhruv", "मीरा": "Meera", "यश": "Yash", "सिमरन": "Simran",
+    # Hindi Surnames
+    "पटेल": "Patel", "शाह": "Shah", "मेहता": "Mehta", "देसाई": "Desai",
+    "जोशी": "Joshi", "कुमार": "Kumar",
+    # Additional common names
+    "રાજ": "Raj", "દેવ": "Dev", "શર્મા": "Sharma",
+    "राज": "Raj", "देव": "Dev", "शर्मा": "Sharma",
 }
 
 
@@ -51,7 +60,7 @@ class Database:
     def __init__(self):
         self.use_sqlite = False
         self.conn = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         if PSYCOPG2_AVAILABLE and config.DATABASE_URL:
             try:
@@ -97,22 +106,144 @@ class Database:
             except Exception as pe:
                 print(f"[db] WAL pragma notice: {pe}")
             self._init_sqlite_schema()
-            self.close_stale_calls()
+        self.close_stale_calls()
         print("[db] Connected to SQLite database (WAL mode enabled).")
 
     def _init_postgres_schema(self):
-        """Initializes PostgreSQL schema and seed data if empty."""
-        schema_file = os.path.join(os.path.dirname(__file__), "schema.sql")
-        if os.path.exists(schema_file):
-            try:
-                with open(schema_file, "r", encoding="utf-8") as f:
-                    sql_script = f.read()
-                cursor = self.conn.cursor()
-                cursor.execute(sql_script)
-                self._migrate_call_logs_columns()
-                print("[db] PostgreSQL schema and seed data verified.")
-            except Exception as err:
-                print(f"[db] PostgreSQL schema init notice: {err}")
+        """Initializes PostgreSQL schema, compatibility columns, and core tables if missing."""
+        try:
+            cursor = self.conn.cursor()
+
+            # 1. Detect existing columns on students table and ensure backward-compatible aliases
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'students';
+            """)
+            existing_cols = {row[0] for row in cursor.fetchall()}
+            if existing_cols:
+                if "student_name" in existing_cols and "name" not in existing_cols:
+                    cursor.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS name VARCHAR(100);")
+                if "course" in existing_cols and "department_id" not in existing_cols:
+                    cursor.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS department_id VARCHAR(50);")
+                if "batch" in existing_cols and "semester" not in existing_cols:
+                    cursor.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS semester INT DEFAULT 4;")
+                if "mobile_number" in existing_cols and "parent_phone" not in existing_cols:
+                    cursor.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS parent_phone VARCHAR(50);")
+                if "student_id" not in existing_cols:
+                    cursor.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS student_id VARCHAR(50);")
+
+                cursor.execute("""
+                    UPDATE students SET
+                        student_id = COALESCE(student_id, 'STU' || id::text),
+                        name = COALESCE(name, student_name),
+                        department_id = COALESCE(department_id, CASE 
+                            WHEN course ILIKE '%computer%' THEN 'CSE'
+                            WHEN course ILIKE '%information%' OR course ILIKE '%it%' THEN 'IT'
+                            WHEN course ILIKE '%electronic%' OR course ILIKE '%ece%' THEN 'ECE'
+                            WHEN course ILIKE '%mech%' THEN 'MECH'
+                            WHEN course ILIKE '%civil%' THEN 'CIVIL'
+                            WHEN course ILIKE '%elect%' THEN 'ELECT'
+                            ELSE course END),
+                        semester = COALESCE(semester, 4),
+                        parent_phone = COALESCE(parent_phone, mobile_number);
+                """)
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_students_student_id ON students(student_id);")
+
+            # 2. Ensure core application tables exist
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS departments (
+                    department_id VARCHAR(50) PRIMARY KEY,
+                    department_name VARCHAR(100) NOT NULL
+                );
+                INSERT INTO departments (department_id, department_name) VALUES
+                ('CSE', 'Computer Science & Engineering'),
+                ('IT', 'Information Technology'),
+                ('ECE', 'Electronics & Communication Engineering'),
+                ('MECH', 'Mechanical Engineering'),
+                ('CIVIL', 'Civil Engineering'),
+                ('ELECT', 'Electrical Engineering')
+                ON CONFLICT (department_id) DO NOTHING;
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admission_info (
+                    id SERIAL PRIMARY KEY,
+                    program VARCHAR(100) NOT NULL,
+                    eligibility TEXT NOT NULL,
+                    fee_per_year VARCHAR(50) NOT NULL,
+                    last_date_to_apply VARCHAR(50) NOT NULL
+                );
+                INSERT INTO admission_info (program, eligibility, fee_per_year, last_date_to_apply) VALUES
+                ('B.Tech Computer Science (CSE)', '10+2 with Physics, Chem, Math (min 60% aggregate) + JEE Main score', '₹2,50,000 / year', '31st July 2026'),
+                ('B.Tech Information Technology (IT)', '10+2 with PCM (min 60% aggregate) + JEE Main/GUJCET', '₹2,50,000 / year', '31st July 2026'),
+                ('B.Tech Electronics (ECE)',      '10+2 with PCM (min 55% aggregate)', '₹2,10,000 / year', '31st July 2026'),
+                ('B.Tech Mechanical (MECH)',     '10+2 with PCM (min 50% aggregate)', '₹1,80,000 / year', '31st July 2026'),
+                ('M.Tech Artificial Intelligence','B.Tech/B.E. in relevant field + GATE score', '₹1,80,000 / year', '15th August 2026')
+                ON CONFLICT DO NOTHING;
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS placement_stats (
+                    id SERIAL PRIMARY KEY,
+                    year INT NOT NULL,
+                    department_id VARCHAR(50),
+                    highest_package_lpa NUMERIC(5, 2),
+                    average_package_lpa NUMERIC(5, 2),
+                    placement_rate_pct NUMERIC(5, 2),
+                    top_recruiters TEXT
+                );
+                INSERT INTO placement_stats (year, department_id, highest_package_lpa, average_package_lpa, placement_rate_pct, top_recruiters) VALUES
+                (2025, 'CSE',  45.00, 12.50, 96.50, 'Google, Microsoft, Amazon, TCS, Infosys'),
+                (2025, 'IT',   40.00, 11.80, 95.00, 'Amazon, Oracle, Infosys, Wipro'),
+                (2025, 'ECE',  28.00,  9.20, 91.00, 'Qualcomm, Intel, Samsung, L&T'),
+                (2025, 'MECH', 18.00,  7.50, 85.00, 'Tata Motors, L&T, Mahindra, Bosch')
+                ON CONFLICT DO NOTHING;
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS call_logs (
+                    id SERIAL PRIMARY KEY,
+                    call_id VARCHAR(50) NOT NULL UNIQUE,
+                    caller_number VARCHAR(64) DEFAULT 'Web',
+                    language VARCHAR(20) DEFAULT 'gu-IN',
+                    started_at VARCHAR(64) NOT NULL,
+                    ended_at VARCHAR(64),
+                    duration_seconds INT DEFAULT 0,
+                    total_turns INT DEFAULT 0,
+                    queries_json TEXT DEFAULT '[]',
+                    status VARCHAR(30) DEFAULT 'ongoing',
+                    intent VARCHAR(100),
+                    lead_status VARCHAR(50),
+                    sentiment VARCHAR(20),
+                    disposition VARCHAR(100),
+                    follow_up_action TEXT,
+                    summary TEXT
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS marks (
+                    id SERIAL PRIMARY KEY,
+                    student_id VARCHAR(50),
+                    subject VARCHAR(100) NOT NULL,
+                    marks_obtained INT NOT NULL,
+                    max_marks INT NOT NULL DEFAULT 100,
+                    grade VARCHAR(20)
+                );
+                CREATE TABLE IF NOT EXISTS attendance (
+                    id SERIAL PRIMARY KEY,
+                    student_id VARCHAR(50),
+                    subject VARCHAR(100) NOT NULL,
+                    total_classes INT NOT NULL,
+                    classes_attended INT NOT NULL,
+                    attendance_percentage NUMERIC(5, 2)
+                );
+            """)
+
+            self._migrate_call_logs_columns()
+            print("[db] PostgreSQL schema and compatibility verified.")
+        except Exception as err:
+            print(f"[db] PostgreSQL schema init notice: {err}")
 
     def _init_sqlite_schema(self):
         """Initializes local SQLite schema and populates seed data if empty."""
@@ -194,16 +325,46 @@ class Database:
             WHERE LOWER(s.student_id) = LOWER(?) OR LOWER(s.name) LIKE LOWER(?) OR LOWER(s.name) LIKE LOWER(?)
             LIMIT 1
         """ if self.use_sqlite else """
-            SELECT s.student_id, s.name, d.department_name, s.semester, s.parent_phone
+            SELECT COALESCE(s.student_id, 'STU' || s.id::text) AS student_id,
+                   s.id,
+                   COALESCE(s.name, s.student_name) AS name,
+                   COALESCE(s.student_name, s.name) AS student_name,
+                   COALESCE(d.department_name, s.course, s.department_id, 'General') AS department_name,
+                   COALESCE(s.course, d.department_name) AS course,
+                   COALESCE(s.semester, 4) AS semester,
+                   COALESCE(s.batch, '') AS batch,
+                   COALESCE(s.parent_phone, s.mobile_number, '') AS parent_phone,
+                   COALESCE(s.mobile_number, s.parent_phone, '') AS mobile_number,
+                   s.cpi,
+                   s.attendance_percentage
             FROM students s
-            JOIN departments d ON s.department_id = d.department_id
-            WHERE LOWER(s.student_id) = LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s) OR LOWER(s.name) LIKE LOWER(%s)
+            LEFT JOIN departments d ON s.department_id = d.department_id
+            WHERE LOWER(COALESCE(s.student_id, '')) = LOWER(%s)
+               OR s.id::text = %s
+               OR LOWER(COALESCE(s.name, s.student_name, '')) LIKE LOWER(%s)
+               OR LOWER(COALESCE(s.student_name, s.name, '')) LIKE LOWER(%s)
             LIMIT 1
         """
         pattern_orig = f"%{identifier}%"
         pattern_clean = f"%{clean_id}%"
-        results = self._execute_query(query, (clean_id, pattern_clean, pattern_orig))
-        return results[0] if results else None
+        if self.use_sqlite:
+            results = self._execute_query(query, (clean_id, pattern_clean, pattern_orig))
+        else:
+            raw_num = clean_id.replace("STU", "").replace("stu", "").strip()
+            results = self._execute_query(query, (clean_id, raw_num, pattern_clean, pattern_orig))
+        if results:
+            r = dict(results[0])
+            r["student_id"] = str(r.get("student_id") or r.get("id") or "")
+            r["name"] = r.get("name") or r.get("student_name") or ""
+            r["student_name"] = r["name"]
+            r["department_name"] = r.get("department_name") or r.get("course") or ""
+            r["course"] = r["department_name"]
+            if r.get("cpi") is not None:
+                r["cpi"] = float(r["cpi"])
+            if r.get("attendance_percentage") is not None:
+                r["attendance_percentage"] = float(r["attendance_percentage"])
+            return r
+        return None
 
     def get_student_marks(self, student_id: str) -> list[dict]:
         """Get marks of a student by student_id."""
@@ -214,9 +375,24 @@ class Database:
         """ if self.use_sqlite else """
             SELECT subject, marks_obtained, max_marks, grade
             FROM marks
-            WHERE LOWER(student_id) = LOWER(%s)
+            WHERE LOWER(student_id) = LOWER(%s) OR student_id = %s
         """
-        return self._execute_query(query, (student_id,))
+        raw_id = str(student_id).replace("STU", "").replace("stu", "").strip()
+        marks = self._execute_query(query, (student_id,) if self.use_sqlite else (student_id, raw_id))
+        if marks:
+            return marks
+
+        # Fallback to student record CPI if marks table has no rows
+        stu = self.lookup_student(student_id)
+        if stu and stu.get("cpi") is not None:
+            cpi_val = float(stu["cpi"])
+            return [{
+                "subject": "Cumulative Performance Index (CPI)",
+                "marks_obtained": int(round(cpi_val * 10)),
+                "max_marks": 100,
+                "grade": f"{cpi_val:.2f} CPI",
+            }]
+        return []
 
     def get_student_attendance(self, student_id: str) -> list[dict]:
         """Get attendance details of a student by student_id."""
@@ -227,9 +403,24 @@ class Database:
         """ if self.use_sqlite else """
             SELECT subject, total_classes, classes_attended, attendance_percentage
             FROM attendance
-            WHERE LOWER(student_id) = LOWER(%s)
+            WHERE LOWER(student_id) = LOWER(%s) OR student_id = %s
         """
-        return self._execute_query(query, (student_id,))
+        raw_id = str(student_id).replace("STU", "").replace("stu", "").strip()
+        att = self._execute_query(query, (student_id,) if self.use_sqlite else (student_id, raw_id))
+        if att:
+            return att
+
+        # Fallback to student record attendance_percentage
+        stu = self.lookup_student(student_id)
+        if stu and stu.get("attendance_percentage") is not None:
+            pct_val = float(stu["attendance_percentage"])
+            return [{
+                "subject": "Overall Attendance",
+                "total_classes": 100,
+                "classes_attended": int(round(pct_val)),
+                "attendance_percentage": pct_val,
+            }]
+        return []
 
     def get_placement_stats(self, department: str = "") -> list[dict]:
         """Get placement statistics, optionally filtered by department."""
@@ -278,7 +469,15 @@ class Database:
 
     def get_all_student_identifiers(self) -> list[dict]:
         """Returns student_id and name for all enrolled students for fast anticipatory lookup."""
-        return self._execute_query("SELECT student_id, name FROM students ORDER BY student_id")
+        query = """
+            SELECT student_id, name FROM students ORDER BY student_id
+        """ if self.use_sqlite else """
+            SELECT COALESCE(student_id, 'STU' || id::text) AS student_id,
+                   COALESCE(name, student_name) AS name
+            FROM students
+            ORDER BY id
+        """
+        return self._execute_query(query)
 
     def add_student(
         self,

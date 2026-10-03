@@ -56,7 +56,7 @@ class VoiceCallSession:
 
         try:
             transcript, detected_lang = await asyncio.to_thread(
-                self.stt.transcribe, audio_bytes, self.language_code
+                self.stt.transcribe, audio_bytes, None
             )
         except Exception as e:
             print(f"[ws-session] STT error: {e}")
@@ -66,7 +66,7 @@ class VoiceCallSession:
             print("[ws-session] (empty transcription)")
             return
 
-        turn_lang, bcp47, _ = self.llm.detect_turn_language(transcript, detected_lang)
+        turn_lang, bcp47, _ = self.llm.detect_turn_language(transcript, self.language_code, stt_lang=detected_lang)
         self.language_code = bcp47
         print(f"[ws-session] User [{bcp47}]: {transcript}")
 
@@ -76,7 +76,7 @@ class VoiceCallSession:
         async def llm_producer():
             nonlocal buffer
             try:
-                async for piece in self.llm.areply_stream(transcript):
+                async for piece in self.llm.areply_stream(transcript, stt_lang=detected_lang):
                     buffer += piece
                     ready_sentences, buffer = split_ready_sentences(buffer)
 
