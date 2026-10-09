@@ -920,9 +920,19 @@ async def primary_answer_endpoint(request: Request):
     fwd_proto = request.headers.get("x-forwarded-proto", "").lower()
     proto = "wss" if fwd_proto == "https" or "render.com" in host or request.url.scheme == "https" else "ws"
     ws_url = f"{proto}://{host}/ws/vobiz"
+    status_proto = "https" if proto == "wss" else "http"
+    hangup_callback_url = f"{status_proto}://{host}/api/vobiz/hangup"
+
+    # Support both audio/x-mulaw;rate=8000 (standard Vobiz telephony default) and audio/x-l16;rate=16000
+    requested_fmt = request.query_params.get("format", "").lower()
+    if requested_fmt in ("l16", "linear16", "pcm", "16000"):
+        content_type_attr = 'contentType="audio/x-l16;rate=16000"'
+    else:
+        content_type_attr = 'contentType="audio/x-mulaw;rate=8000"'
+
     xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000">
+  <Stream bidirectional="true" keepCallAlive="true" {content_type_attr} statusCallbackUrl="{hangup_callback_url}" statusCallbackMethod="POST">
     {ws_url}
   </Stream>
 </Response>"""
@@ -1029,6 +1039,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     active_turn_task = None
     audio_queue: asyncio.Queue = asyncio.Queue()
     is_playing_event = asyncio.Event()  # set = currently playing audio
+    is_mulaw = True  # Dynamically updated on 'start' event; default is standard telephony mu-law
 
     async def vobiz_audio_sender():
         """Drains the audio queue sequentially so sentences never interleave."""
@@ -1049,17 +1060,34 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                         pcm_bytes = wf.readframes(wf.getnframes())
                 except Exception:
                     pcm_bytes = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
-                b64_payload = base64.b64encode(pcm_bytes).decode("utf-8")
+
+                if is_mulaw:
+                    from utils import pcm16_16k_to_mulaw
+                    out_bytes = pcm16_16k_to_mulaw(pcm_bytes)
+                    out_content_type = "audio/x-mulaw"
+                    out_sample_rate = 8000
+                else:
+                    out_bytes = pcm_bytes
+                    out_content_type = "audio/x-l16"
+                    out_sample_rate = 16000
+
+                b64_payload = base64.b64encode(out_bytes).decode("utf-8")
                 msg = {
                     "event": "playAudio",
                     "streamId": stream_id,
                     "media": {
-                        "contentType": "audio/x-l16",
-                        "sampleRate": 16000,
+                        "contentType": out_content_type,
+                        "sampleRate": out_sample_rate,
                         "payload": b64_payload,
                     },
                 }
                 await websocket.send_text(json.dumps(msg))
+                # Send checkpoint event so Vobiz acknowledges when audio has fully played
+                await websocket.send_text(json.dumps({
+                    "event": "checkpoint",
+                    "streamId": stream_id,
+                    "name": "turn_complete",
+                }))
             except Exception as err:
                 print(f"[vobiz-ws] Error sending playAudio: {err}")
             finally:
@@ -1144,8 +1172,15 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 stream_id = data.get("streamId") or data.get("stream_id")
                 call_id = data.get("callId") or data.get("call_id") or ("CALL-TEL-" + uuid.uuid4().hex[:6].upper())
                 caller_num = data.get("caller") or data.get("from") or "Telephony"
+                media_meta = data.get("media", {})
+                fmt_meta = (media_meta.get("contentType") or "").lower()
+                rate_meta = media_meta.get("sampleRate") or 8000
+                if "l16" in fmt_meta or "pcm" in fmt_meta or rate_meta == 16000:
+                    is_mulaw = False
+                else:
+                    is_mulaw = True
                 db.log_call_start(call_id, caller_number=caller_num, language="gu-IN")
-                print(f"🚀 [vobiz-ws] Phone stream started: streamId={stream_id}, callId={call_id}")
+                print(f"🚀 [vobiz-ws] Phone stream started: streamId={stream_id}, callId={call_id}, format={'mu-law 8kHz' if is_mulaw else 'PCM16 16kHz'}")
                 # Greet caller with opening welcome message in Gujarati over the phone
                 asyncio.create_task(send_vobiz_audio(WELCOME_MESSAGE, "gu-IN"))
 
@@ -1156,7 +1191,13 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     continue
 
                 chunk_bytes = base64.b64decode(b64_chunk)
-                pcm = np.frombuffer(chunk_bytes, dtype=np.int16)
+                if is_mulaw:
+                    from utils import mulaw_to_pcm16_16k
+                    pcm_16k_chunk = mulaw_to_pcm16_16k(chunk_bytes)
+                else:
+                    pcm_16k_chunk = chunk_bytes
+
+                pcm = np.frombuffer(pcm_16k_chunk, dtype=np.int16)
                 if len(pcm) == 0:
                     continue
 
@@ -1181,7 +1222,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                                 "event": "clearAudio",
                                 "streamId": stream_id,
                             }))
-                            audio_chunks = [chunk_bytes]
+                            audio_chunks = [pcm_16k_chunk]
                             is_speech_active = True
                             last_speech_time = asyncio.get_running_loop().time()
                     else:
@@ -1195,12 +1236,12 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     if consecutive_speech >= 2:
                         if not is_speech_active:
                             is_speech_active = True
-                        audio_chunks.append(chunk_bytes)
+                        audio_chunks.append(pcm_16k_chunk)
                         last_speech_time = asyncio.get_running_loop().time()
                 else:
                     consecutive_speech = 0
                     if is_speech_active:
-                        audio_chunks.append(chunk_bytes)
+                        audio_chunks.append(pcm_16k_chunk)
                         # Check 0.55s silence commit
                         now = asyncio.get_running_loop().time()
                         if now - last_speech_time >= 0.55:
@@ -1211,7 +1252,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                                 active_turn_task.cancel()
                             active_turn_task = asyncio.create_task(process_caller_audio(total_pcm))
 
-            elif event == "playedStream":
+            elif event in ("playedStream", "clearedAudio"):
                 is_playing_event.clear()
 
             elif event == "stop":

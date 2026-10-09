@@ -15,6 +15,7 @@ from .text_utils import (
     HOLD_PHRASE_REGEX,
     query_needs_db_or_rag,
 )
+from .audio_utils import mulaw_to_pcm16_16k, pcm16_16k_to_mulaw
 
 __all__ = [
     "split_ready_sentences",
@@ -29,4 +30,6 @@ __all__ = [
     "HOLD_PHRASES",
     "HOLD_PHRASE_REGEX",
     "query_needs_db_or_rag",
+    "mulaw_to_pcm16_16k",
+    "pcm16_16k_to_mulaw",
 ]
