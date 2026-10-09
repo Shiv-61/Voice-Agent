@@ -21,4 +21,7 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "scipy>=1.18.1",
     "pyyaml>=6.0.0",
+    "pgvector>=0.3.0",
+    "psycopg>=3.1.0",
+    "sentence-transformers>=3.0.0",
 ]

@@ -15,6 +15,7 @@ from db.database import Database, transliterate_student_name
 from rag import RAGStore
 from utils import (
     is_hangup_intent,
+    is_agent_farewell,
     clean_speech_text,
     is_prompt_leak,
     HOLD_PHRASES,
@@ -423,9 +424,22 @@ class LLM:
         lang_code, bcp47, lang_cue = self.detect_turn_language(clean_user_text, self.current_lang, stt_lang=stt_lang)
         self.current_lang = lang_code
 
+        is_hangup = is_hangup_intent(clean_user_text)
         hold_phrase = HOLD_PHRASES.get(lang_code, HOLD_PHRASES["gu"])
         hold_directive = ""
-        if has_db_or_rag:
+        if is_hangup:
+            farewell_map = {
+                "gu": "તમારા સમય માટે આભાર. તમારો દિવસ શુભ રહે!",
+                "hi": "आपके समय के लिए धन्यवाद। आपका दिन शुभ हो!",
+                "en": "Thank you for your time. Have a great day!",
+            }
+            exact_farewell = farewell_map.get(lang_code, farewell_map["gu"])
+            hold_directive = (
+                f"[MANDATORY CLOSING DIRECTIVE: The caller is concluding or saying goodbye. "
+                f"You MUST reply ONLY with this exact farewell sentence in {lang_code}: \"{exact_farewell}\". "
+                f"Do not ask any follow-up questions and do not say any other words.]\n"
+            )
+        elif has_db_or_rag:
             hold_directive = (
                 f"[MANDATORY OPENING: You are retrieving information from university database/documents. "
                 f"Start your spoken answer with: \"{hold_phrase}\" followed by the facts.]\n"
@@ -532,12 +546,12 @@ class LLM:
         lines.append("[END OF CHAT HISTORY]\n")
         return "\n".join(lines)
 
-    def check_call_hangup(self, user_text: str) -> bool:
+    def check_call_hangup(self, user_text: str, agent_text: str = "") -> bool:
         """
-        Fast zero-latency evaluation of whether caller intends to end the call.
-        Replaces slow blocking LLM round-trips with instant multi-lingual intent matching.
+        Fast zero-latency evaluation of whether caller intends to end the call,
+        or whether agent has completed the farewell: 'Thank you for your time. Have a great day!'.
         """
-        return is_hangup_intent(user_text)
+        return is_hangup_intent(user_text) or is_agent_farewell(agent_text)
 
     def _get_provider_request(self, messages: list[dict], provider_override: str | None = None):
         """Builds URL, headers, and payload for streaming LLM calls."""

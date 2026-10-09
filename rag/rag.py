@@ -5,6 +5,7 @@ Ingests, chunks, embeds, and queries university documents (PDFs) using ChromaDB 
 
 import hashlib
 import io
+import json
 import os
 import re
 import time
@@ -33,7 +34,29 @@ class RAGStore:
             metadata={"description": "University admission brochures, rules, policies, and FAQs"},
         )
         print(f"[rag] Vector Store initialized at '{persist_dir}'. Active chunks: {self.collection.count()}")
+        self.has_pgvector = False
+        self._embed_model = None
+        self._check_pgvector()
         self._auto_seed_sample_pdf()
+
+    def _check_pgvector(self):
+        """Checks if PostgreSQL pgvector knowledge_chunks table is active and populated."""
+        if not getattr(config, "DATABASE_URL", None) or "postgres" not in config.DATABASE_URL.lower():
+            return
+        try:
+            import psycopg
+            from pgvector.psycopg import register_vector
+            with psycopg.connect(config.DATABASE_URL) as conn:
+                register_vector(conn)
+                cur = conn.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='knowledge_chunks';")
+                if cur.fetchone()[0] > 0:
+                    cur2 = conn.execute("SELECT COUNT(*) FROM knowledge_chunks;")
+                    cnt = cur2.fetchone()[0]
+                    if cnt > 0:
+                        self.has_pgvector = True
+                        print(f"[rag] Active PGVector Knowledge Base connected! Total chunks: {cnt}")
+        except Exception as e:
+            print(f"[rag] PGVector connection notice: {e}")
 
     def _auto_seed_sample_pdf(self):
         """Auto-seeds default university policy document if missing from vector store."""
@@ -244,6 +267,7 @@ class RAGStore:
                 metadatas=all_metadatas,
             )
             print(f"[rag] Successfully ingested '{filename}' [{category}]: {len(all_chunks)} chunks across {total_pages} pages.")
+            self._sync_chunks_to_pgvector(all_chunks, filename, category, doc_id, all_metadatas)
 
         return {
             "doc_id": doc_id,
@@ -255,14 +279,181 @@ class RAGStore:
             "status": "indexed" if all_chunks else "empty",
         }
 
+    def _sync_chunks_to_pgvector(
+        self, chunks: list[str], filename: str, category: str, doc_id: str, metadatas: list[dict]
+    ):
+        """Synchronizes ingested chunks and embeddings to PostgreSQL pgvector table 'knowledge_chunks'."""
+        if not self.has_pgvector:
+            return
+        try:
+            import psycopg
+            from pgvector.psycopg import register_vector
+            if self._embed_model is None:
+                from sentence_transformers import SentenceTransformer
+                self._embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+            embs = self._embed_model.encode(chunks, normalize_embeddings=True)
+            with psycopg.connect(config.DATABASE_URL) as conn:
+                register_vector(conn)
+                conn.execute("DELETE FROM knowledge_chunks WHERE source = %s OR metadata->>'doc_id' = %s;", (filename, doc_id))
+                insert_query = """
+                    INSERT INTO knowledge_chunks
+                        (content, source, category, page, chunk_index, metadata, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """
+                records = []
+                for chunk, meta, emb in zip(chunks, metadatas, embs):
+                    records.append((
+                        chunk,
+                        filename,
+                        category,
+                        meta.get("page", 1),
+                        meta.get("chunk_index", 1),
+                        json.dumps(meta),
+                        emb.tolist(),
+                    ))
+                with conn.cursor() as cur:
+                    cur.executemany(insert_query, records)
+                conn.commit()
+                print(f"[rag] Synchronized {len(records)} chunks to PGVector for '{filename}'.")
+        except Exception as e:
+            print(f"[rag] PGVector sync notice: {e}")
+
+    def ingest_text(
+        self, text: str, filename: str, category: str = "general_campus"
+    ) -> dict[str, Any]:
+        """
+        Chunks and indexes raw text or markdown information into ChromaDB.
+        Enables adding FAQs, policies, fee updates, or new guidelines without needing a PDF.
+        """
+        cleaned_text = re.sub(r"\s+", " ", text).strip()
+        if not cleaned_text:
+            return {"error": "Text is empty", "status": "failed", "total_chunks": 0}
+
+        content_hash = hashlib.md5(cleaned_text.encode("utf-8")).hexdigest()[:12]
+        doc_id = f"doc_{content_hash}"
+        upload_time = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Automatic category detection if general_campus
+        lower_fn = (filename + " " + cleaned_text[:200]).lower()
+        if category == "general_campus":
+            if any(k in lower_fn for k in ["curriculum", "syllabus", "course", "semester", "credit", "scheme", "regulation", "subject"]):
+                category = "college_curriculum"
+            elif any(k in lower_fn for k in ["student", "mark", "grade", "attendance", "result", "transcript", "batch", "stu", "roll"]):
+                category = "student_records"
+            elif any(k in lower_fn for k in ["admission", "fee", "hostel", "placement"]):
+                category = "admissions_and_campus"
+
+        # Remove previous chunks with identical filename/title
+        try:
+            existing = self.collection.get(where={"filename": filename})
+            if existing and existing.get("ids"):
+                old_ids = existing["ids"]
+                print(f"[rag] Removing {len(old_ids)} stale chunks for text '{filename}' before re-indexing.")
+                self.collection.delete(ids=old_ids)
+        except Exception as dedup_err:
+            print(f"[rag] Text dedup notice: {dedup_err}")
+
+        chunks = self._chunk_text(cleaned_text)
+        all_chunks = []
+        all_ids = []
+        all_metadatas = []
+
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_id = f"{doc_id}_c{idx}"
+            all_ids.append(chunk_id)
+            all_chunks.append(chunk)
+            all_metadatas.append({
+                "doc_id": doc_id,
+                "filename": filename,
+                "page": 1,
+                "chunk_index": idx,
+                "upload_time": upload_time,
+                "category": category,
+            })
+
+        if all_chunks:
+            self.collection.add(
+                ids=all_ids,
+                documents=all_chunks,
+                metadatas=all_metadatas,
+            )
+            print(f"[rag] Successfully ingested text '{filename}' [{category}]: {len(all_chunks)} chunks.")
+            self._sync_chunks_to_pgvector(all_chunks, filename, category, doc_id, all_metadatas)
+
+        return {
+            "doc_id": doc_id,
+            "filename": filename,
+            "category": category,
+            "total_pages": 1,
+            "total_chunks": len(all_chunks),
+            "upload_time": upload_time,
+            "status": "indexed" if all_chunks else "empty",
+        }
+
+    def _query_pgvector(
+        self, query: str, n_results: int = 4, min_similarity: float = 0.40
+    ) -> list[dict[str, Any]]:
+        """Queries PostgreSQL knowledge_chunks using pgvector cosine distance."""
+        try:
+            import psycopg
+            from pgvector.psycopg import register_vector
+            if self._embed_model is None:
+                from sentence_transformers import SentenceTransformer
+                self._embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+            q_emb = self._embed_model.encode([query], normalize_embeddings=True)[0]
+
+            with psycopg.connect(config.DATABASE_URL) as conn:
+                register_vector(conn)
+                cur = conn.execute("""
+                    SELECT content, source, category, page, metadata,
+                           1 - (embedding <=> %s::vector) AS similarity_score
+                    FROM knowledge_chunks
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                """, (q_emb.tolist(), q_emb.tolist(), n_results * 2))
+                rows = cur.fetchall()
+
+            results = []
+            for row in rows:
+                content, source, category, page, meta, score = row
+                if score < min_similarity:
+                    continue
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                meta = meta or {}
+                meta.update({"filename": source, "page": page, "category": category})
+                results.append({
+                    "text": content,
+                    "metadata": meta,
+                    "similarity_score": round(float(score), 3),
+                })
+            return results[:n_results]
+        except Exception as e:
+            print(f"[rag] PGVector query notice: {e}")
+            return []
+
     def query_documents(
         self, query: str, n_results: int = 4, min_similarity: float = 0.50
     ) -> list[dict[str, Any]]:
         """
         Queries the vector store with hybrid semantic similarity and domain keyword boosting.
-        Applies target semester alignment so syllabus questions retrieve exact semester tables.
+        Checks active PostgreSQL pgvector collection first, falling back to ChromaDB.
         """
-        if not query.strip() or self.collection.count() == 0:
+        if not query.strip():
+            return []
+
+        # 1. Prefer PostgreSQL pgvector if active (for persistent cloud Render deployment)
+        if self.has_pgvector:
+            pg_res = self._query_pgvector(query, n_results=n_results, min_similarity=min_similarity)
+            if pg_res:
+                return pg_res
+
+        if self.collection.count() == 0:
             return []
 
         # Query a candidate pool to allow intelligent hybrid re-ranking
@@ -408,6 +599,16 @@ class RAGStore:
                 self.collection.delete(where={"doc_id": alt_id})
             except Exception:
                 pass
+
+            if self.has_pgvector:
+                try:
+                    import psycopg
+                    with psycopg.connect(config.DATABASE_URL) as conn:
+                        conn.execute("DELETE FROM knowledge_chunks WHERE metadata->>'doc_id' = %s OR metadata->>'doc_id' = %s OR source = %s;", (doc_id, alt_id, doc_id))
+                        conn.commit()
+                except Exception as pe:
+                    print(f"[rag] PGVector delete notice: {pe}")
+
             print(f"[rag] Deleted document ID '{doc_id}' from vector store.")
             return True
         except Exception as e:

@@ -4,6 +4,7 @@ Utility helpers for Voice Agent.
 from .text_utils import (
     split_ready_sentences,
     is_hangup_intent,
+    is_agent_farewell,
     clean_speech_text,
     is_prompt_leak,
     is_noise_hallucination,
@@ -18,6 +19,7 @@ from .text_utils import (
 __all__ = [
     "split_ready_sentences",
     "is_hangup_intent",
+    "is_agent_farewell",
     "clean_speech_text",
     "is_prompt_leak",
     "is_noise_hallucination",

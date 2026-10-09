@@ -28,7 +28,15 @@ from stt import STT
 from tts import TTS
 from utils.filler_manager import FillerManager
 
-from utils import split_ready_sentences, is_hangup_intent, clean_speech_text, is_prompt_leak, is_noise_hallucination, is_filler_phrase
+from utils import (
+    split_ready_sentences,
+    is_hangup_intent,
+    is_agent_farewell,
+    clean_speech_text,
+    is_prompt_leak,
+    is_noise_hallucination,
+    is_filler_phrase,
+)
 
 
 # Initialize application
@@ -243,6 +251,32 @@ async def search_documents(req: SearchRequest):
     """Tests semantic search on indexed documents."""
     results = rag.query_documents(req.query, n_results=req.n_results)
     return {"query": req.query, "results": results, "count": len(results)}
+
+
+class TextDocumentUploadRequest(BaseModel):
+    text: str
+    title: str = "custom_knowledge.txt"
+    category: str = "general_campus"
+
+
+@app.post("/api/documents/text")
+async def upload_text_document(req: TextDocumentUploadRequest):
+    """
+    Ingests raw text or markdown content into ChromaDB RAG.
+    Enables adding FAQs, university guidelines, fee updates, or policies directly without a PDF.
+    """
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Text content cannot be empty.")
+    try:
+        result = rag.ingest_text(req.text, req.title.strip(), req.category.strip())
+        return {
+            "success": True,
+            "message": f"Successfully indexed text document '{req.title}'",
+            "data": result,
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to process text document: {str(e)}")
 
 
 # -----------------------------------------------------------------------------
@@ -543,22 +577,24 @@ class WebVoiceSession:
         try:
             await asyncio.gather(llm_producer(), tts_consumer())
 
+            should_hangup = is_hangup or is_agent_farewell(full_agent_reply)
+
             # Signal completion with call_hangup flag and active turn language
             await self.send_json_safe({
                 "event": "agent_done",
                 "full_text": full_agent_reply.strip(),
                 "language": active_lang,
-                "call_hangup": is_hangup,
+                "call_hangup": should_hangup,
             })
 
-            # If hangup condition satisfied, signal call disconnection
-            if is_hangup:
-                print("📞 [web-ws] Call hangup condition met. Initiating disconnect...")
-                await asyncio.sleep(1.0)  # Allow final farewell speech chunk to play
+            # If hangup condition satisfied (by caller intent or agent farewell), disconnect call
+            if should_hangup:
+                print(f"📞 [web-ws] Farewell delivered ({'agent farewell: Thank you for your time. Have a great day!' if is_agent_farewell(full_agent_reply) else 'caller intent'}). Initiating disconnect...")
+                await asyncio.sleep(2.0)  # Allow final farewell speech chunk to finish playing in browser
                 await self.send_json_safe({
                     "event": "call_ended",
                     "call_hangup": True,
-                    "reason": "Caller concluded conversation",
+                    "reason": "Agent concluded conversation with farewell",
                 })
         except asyncio.CancelledError:
             print("🛑 [web-ws] Active query pipeline cancelled due to user barge-in.")
@@ -841,15 +877,45 @@ async def websocket_call_endpoint(websocket: WebSocket):
 
 
 # -----------------------------------------------------------------------------
-# Telephony Integration: Vobiz Audio Streams (https://vobiz.ai)
+# Telephony Integration: Vobiz & Plivo Audio Streams (Primary Answer & Hangup URLs)
 # -----------------------------------------------------------------------------
 
 @app.api_route("/api/vobiz/answer", methods=["GET", "POST"])
-async def vobiz_answer_endpoint(request: Request):
+@app.api_route("/api/telephony/answer", methods=["GET", "POST"])
+@app.api_route("/answer", methods=["GET", "POST"])
+@app.api_route("/primary-answer", methods=["GET", "POST"])
+async def primary_answer_endpoint(request: Request):
     """
-    Vobiz Answer URL webhook.
-    Returns XML instruction telling Vobiz to connect a bidirectional WebSocket stream.
+    Primary Answer URL webhook.
+    Called when an inbound telephone call starts (HTTP POST/GET).
+    Must return valid call instructions (XML) instructing the telephony provider (Vobiz/Plivo)
+    to connect a bidirectional 16kHz linear PCM WebSocket stream.
     """
+    caller_num = "Telephony"
+    call_uuid = ""
+    try:
+        content_type = request.headers.get("content-type", "").lower()
+        form_data = {}
+        if "form" in content_type:
+            form = await request.form()
+            form_data = dict(form)
+        elif "json" in content_type:
+            form_data = await request.json()
+        if not form_data:
+            form_data = dict(request.query_params)
+
+        call_uuid = form_data.get("CallUUID") or form_data.get("call_uuid") or form_data.get("CallSid") or ""
+        caller_num = form_data.get("From") or form_data.get("caller") or form_data.get("from") or "Telephony"
+    except Exception as parse_err:
+        print(f"[answer-webhook] Notice parsing incoming call payload: {parse_err}")
+
+    if call_uuid:
+        try:
+            db.log_call_start(call_uuid, caller_number=caller_num, language="gu-IN")
+            print(f"📞 [telephony] Logged incoming call start: UUID={call_uuid}, From={caller_num}")
+        except Exception as db_err:
+            print(f"[answer-webhook] DB log notice: {db_err}")
+
     host = request.headers.get("host", f"localhost:{config.WS_PORT}")
     fwd_proto = request.headers.get("x-forwarded-proto", "").lower()
     proto = "wss" if fwd_proto == "https" or "render.com" in host or request.url.scheme == "https" else "ws"
@@ -861,6 +927,73 @@ async def vobiz_answer_endpoint(request: Request):
   </Stream>
 </Response>"""
     return Response(content=xml_content, media_type="application/xml")
+
+
+@app.api_route("/api/vobiz/hangup", methods=["GET", "POST"])
+@app.api_route("/api/telephony/hangup", methods=["GET", "POST"])
+@app.api_route("/hangup", methods=["GET", "POST"])
+async def hangup_endpoint(request: Request):
+    """
+    Hangup URL webhook.
+    Notified via HTTP POST when an inbound telephone call terminates.
+    Logs call end metrics (duration, hangup cause) and launches post-call CRM intelligence.
+    """
+    call_uuid = ""
+    caller_num = ""
+    duration = 0
+    hangup_cause = "normal_clearing"
+
+    try:
+        content_type = request.headers.get("content-type", "").lower()
+        form_data = {}
+        if "form" in content_type:
+            form = await request.form()
+            form_data = dict(form)
+        elif "json" in content_type:
+            form_data = await request.json()
+        if not form_data:
+            form_data = dict(request.query_params)
+
+        call_uuid = form_data.get("CallUUID") or form_data.get("call_uuid") or form_data.get("CallSid") or ""
+        caller_num = form_data.get("From") or form_data.get("caller") or form_data.get("from") or ""
+        duration_raw = form_data.get("Duration") or form_data.get("BillDuration") or form_data.get("duration") or 0
+        try:
+            duration = int(duration_raw)
+        except (ValueError, TypeError):
+            duration = 0
+        hangup_cause = form_data.get("HangupCause") or form_data.get("hangup_cause") or form_data.get("reason") or "normal_clearing"
+    except Exception as parse_err:
+        print(f"[hangup-webhook] Notice parsing hangup payload: {parse_err}")
+
+    print(f"📞 [telephony-hangup] Call ended notification: UUID={call_uuid}, Duration={duration}s, Cause={hangup_cause}")
+
+    if call_uuid:
+        try:
+            db.log_call_end(call_uuid)
+            try:
+                from intelligence.post_call import analyze_and_record_call
+                turns = db.get_call_queries(call_uuid)
+                if turns:
+                    formatted_history = [
+                        {"role": t.get("role", "user"), "content": t.get("query_text", "")}
+                        for t in turns
+                    ]
+                    asyncio.create_task(analyze_and_record_call(call_uuid, formatted_history, db))
+            except Exception as post_err:
+                print(f"[hangup-webhook] Post-call analyzer launch notice: {post_err}")
+        except Exception as db_err:
+            print(f"[hangup-webhook] DB log notice: {db_err}")
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "success",
+            "message": "Call hangup recorded successfully",
+            "call_id": call_uuid,
+            "duration": duration,
+            "hangup_cause": hangup_cause,
+        },
+    )
 
 
 @app.websocket("/ws/vobiz")
@@ -968,19 +1101,29 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
             is_hangup = is_hangup_intent(transcript)
 
             buffer = ""
+            full_agent_reply = ""
             async for piece in llm.areply_stream(transcript, stt_lang=detected_lang):
                 buffer += piece
+                full_agent_reply += piece
                 ready_sentences, buffer = split_ready_sentences(buffer)
                 for sentence in ready_sentences:
                     if sentence.strip():
                         await send_vobiz_audio(sentence.strip(), bcp47)
 
             if buffer.strip():
+                full_agent_reply += buffer
                 await send_vobiz_audio(buffer.strip(), bcp47)
 
-            if is_hangup:
-                print("📞 [vobiz-ws] Caller hangup detected ({call_hangup: true}). Hanging up call.")
-                await asyncio.sleep(1.0)
+            should_hangup = is_hangup or is_agent_farewell(full_agent_reply)
+
+            if should_hangup:
+                farewell_origin = "agent farewell: 'Thank you for your time. Have a great day!'" if is_agent_farewell(full_agent_reply) else "caller hangup intent"
+                print(f"📞 [vobiz-ws] Hangup condition met ({farewell_origin}). Waiting for farewell audio playback to finish...")
+                # Wait for sequential audio queue to empty and currently playing chunk to finish
+                while not audio_queue.empty() or is_playing_event.is_set():
+                    await asyncio.sleep(0.2)
+                await asyncio.sleep(1.0)  # Telephone network buffer
+                print(f"📞 [vobiz-ws] Farewell delivered to caller. Disconnecting call stream {stream_id}...")
                 await websocket.send_text(json.dumps({
                     "event": "stop",
                     "streamId": stream_id,

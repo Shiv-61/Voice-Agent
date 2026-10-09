@@ -72,6 +72,23 @@ CREATE TABLE IF NOT EXISTS call_logs (
     summary TEXT
 );
 
+-- RAG Knowledge Base Vector Store for PostgreSQL & pgvector (Render Cloud & Local)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id SERIAL PRIMARY KEY,
+    content TEXT NOT NULL,
+    source VARCHAR(255) NOT NULL,
+    category VARCHAR(100) DEFAULT 'general',
+    page INT DEFAULT 1,
+    chunk_index INT DEFAULT 1,
+    metadata JSONB DEFAULT '{}',
+    embedding vector(384)
+);
+
+CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx
+ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+
 -- Seed Data
 
 INSERT INTO departments (department_id, department_name) VALUES

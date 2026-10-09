@@ -58,7 +58,7 @@ ABBREVIATIONS = {
     "ph.d", "bba", "mba", "bca", "mca", "b.sc", "m.sc"
 }
 
-# Fast-path hangup patterns across English, Hindi, and Gujarati
+# Fast-path hangup patterns across English, Hindi, and Gujarati (spoken by caller)
 FAST_HANGUP_PATTERNS = [
     # English
     r"\b(bye|goodbye|bye[\s-]bye|good[\s-]bye)\b",
@@ -66,17 +66,41 @@ FAST_HANGUP_PATTERNS = [
     r"\b(that['’]?s all|that is all|nothing else|no more questions)\b",
     r"\b(have a (good|great|nice) day|see you later|talk to you later)\b",
     r"\b(thank you,?\s+bye|thanks,?\s+bye)\b",
+    r"\b(thank you for your time)\b",
     # Hindi
     r"(अलविदा|बाय|बाय\s*बाय)",
     r"(फोन\s*रख\s*दो|कॉल\s*कट\s*कर\s*दो|कॉल\s*काट\s*दो)",
     r"(बस\s*इतना\s*ही|धन्यवाद[,\s]*बस|और\s*कुछ\s*नहीं|कोई\s*सवाल\s*नहीं)",
+    r"(समय\s*के\s*लिए\s*धन्यवाद|दिन\s*शुभ\s*हो)",
     # Gujarati
     r"(આવજો|બાય|બાય\s*બાય)",
     r"(ફોન\s*મૂકી\s*દો|કૉલ\s*કટ\s*કરો)",
     r"(બસ\s*આટલું\s*જ|આભાર[,\s]*બસ|કંઈ\s*નથી\s*પૂછવું|કોઈ\s*પ્રશ્ન\s*નથી)",
+    r"(સમય\s*માટે\s*આભાર|દિવસ\s*શુભ\s*રહે)",
 ]
 
 COMPILED_HANGUP_REGEX = [re.compile(p, re.IGNORECASE) for p in FAST_HANGUP_PATTERNS]
+
+# Patterns detecting the exact agent closing farewell:
+# "Thank you for your time. Have a great day!" across English, Hindi, and Gujarati
+AGENT_FAREWELL_PATTERNS = [
+    # English
+    r"\bthank\s+you\s+for\s+your\s+time\b",
+    r"\bhave\s+a\s+(great|good|nice|wonderful)\s+day\b",
+    # Hindi (Devanagari)
+    r"(?:आपके\s*)?समय\s*(?:के\s*लिए|देने\s*के\s*लिए)\s*धन्यवाद",
+    r"(?:आपका\s*)?दिन\s*(?:शुभ|अच्छा|मंगलमय)\s*(?:हो|रहे|बने)",
+    # Gujarati (Gujarati script)
+    r"(?:તમારા\s*)?સમય\s*(?:માટે|આપવા\s*બદલ)\s*આભાર",
+    r"(?:તમારો\s*)?દિવસ\s*(?:શુભ|સારો)\s*રહે",
+    # Romanized / Transliterated
+    r"\baapke\s+samay\s+ke\s+liye\s+dhanyawad\b",
+    r"\baapka\s+din\s+shubh\b",
+    r"\btamara\s+samay\s+maate\s+aabhar\b",
+    r"\btamaro\s+divas\s+shubh\b",
+]
+
+COMPILED_AGENT_FAREWELL_REGEX = [re.compile(p, re.IGNORECASE) for p in AGENT_FAREWELL_PATTERNS]
 
 
 def split_ready_sentences(buffer: str) -> tuple[list[str], str]:
@@ -132,6 +156,22 @@ def is_hangup_intent(user_text: str) -> bool:
 
     clean_text = user_text.strip().lower()
     for regex in COMPILED_HANGUP_REGEX:
+        if regex.search(clean_text):
+            return True
+
+    return False
+
+
+def is_agent_farewell(agent_text: str) -> bool:
+    """
+    Fast sub-millisecond evaluation of whether the agent has uttered the closing farewell:
+    "Thank you for your time. Have a great day!" (in English, Hindi, or Gujarati).
+    """
+    if not agent_text:
+        return False
+
+    clean_text = agent_text.strip()
+    for regex in COMPILED_AGENT_FAREWELL_REGEX:
         if regex.search(clean_text):
             return True
 

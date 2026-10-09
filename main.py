@@ -29,7 +29,7 @@ from stt import STT
 from llm.llm import LLM, WELCOME_MESSAGE
 from tts import TTS
 
-from utils import split_ready_sentences
+from utils import split_ready_sentences, is_agent_farewell
 
 
 def run_cli_mode():
@@ -112,8 +112,8 @@ def run_cli_mode():
 
             print("\n")
 
-            if is_hangup:
-                print("📞 [Call Supervisor] Call ended by caller ({call_hangup: true}). Goodbye!\n")
+            if is_hangup or is_agent_farewell(buffer):
+                print("📞 [Call Supervisor] Agent delivered closing farewell ('Thank you for your time. Have a great day!'). Call concluded.\n")
                 break
 
     except KeyboardInterrupt:

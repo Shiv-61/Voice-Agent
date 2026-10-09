@@ -564,9 +564,11 @@ class Database:
         query = """
             INSERT INTO call_logs (call_id, caller_number, language, started_at, status)
             VALUES (?, ?, ?, ?, 'ongoing')
+            ON CONFLICT (call_id) DO NOTHING
         """ if self.use_sqlite else """
             INSERT INTO call_logs (call_id, caller_number, language, started_at, status)
             VALUES (%s, %s, %s, %s, 'ongoing')
+            ON CONFLICT (call_id) DO NOTHING
         """
         with self._lock:
             try:
@@ -577,6 +579,26 @@ class Database:
             except Exception as e:
                 print(f"[db] log_call_start error: {e}")
                 return False
+
+    def get_call_queries(self, call_id: str) -> list[dict]:
+        """Returns the list of query/turn dictionaries recorded for a given call_id."""
+        if not call_id:
+            return []
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                ph = "?" if self.use_sqlite else "%s"
+                cursor.execute(f"SELECT queries_json FROM call_logs WHERE call_id = {ph}", (call_id,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    raw = row[0]
+                    if isinstance(raw, str):
+                        return json.loads(raw)
+                    elif isinstance(raw, list):
+                        return raw
+        except Exception as e:
+            print(f"[db] get_call_queries notice: {e}")
+        return []
 
     def log_call_query(self, call_id: str, query_text: str, lang: str = "gu-IN") -> bool:
         """Appends a caller query to the in-memory buffer (Fix #12: no per-turn DB write).
