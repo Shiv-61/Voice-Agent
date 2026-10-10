@@ -1007,6 +1007,8 @@ async def hangup_endpoint(request: Request):
 
 
 @app.websocket("/ws/vobiz")
+@app.websocket("/ws")
+@app.websocket("/ws/telephony")
 async def websocket_vobiz_endpoint(websocket: WebSocket):
     """
     Bidirectional WebSocket endpoint for Vobiz Voice AI Telephony.
