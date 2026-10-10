@@ -132,21 +132,11 @@ class Database:
                 if "student_id" not in existing_cols:
                     cursor.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS student_id VARCHAR(50);")
 
-                cursor.execute("""
-                    UPDATE students SET
-                        student_id = COALESCE(student_id, 'STU' || id::text),
-                        name = COALESCE(name, student_name),
-                        department_id = COALESCE(department_id, CASE 
-                            WHEN course ILIKE '%computer%' THEN 'CSE'
-                            WHEN course ILIKE '%information%' OR course ILIKE '%it%' THEN 'IT'
-                            WHEN course ILIKE '%electronic%' OR course ILIKE '%ece%' THEN 'ECE'
-                            WHEN course ILIKE '%mech%' THEN 'MECH'
-                            WHEN course ILIKE '%civil%' THEN 'CIVIL'
-                            WHEN course ILIKE '%elect%' THEN 'ELECT'
-                            ELSE course END),
-                        semester = COALESCE(semester, 4),
-                        parent_phone = COALESCE(parent_phone, mobile_number);
-                """)
+                if "id" in existing_cols:
+                    try:
+                        cursor.execute("UPDATE students SET student_id = COALESCE(student_id, 'STU' || id::text) WHERE student_id IS NULL;")
+                    except Exception:
+                        pass
                 cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_students_student_id ON students(student_id);")
 
             # 2. Ensure core application tables exist
@@ -331,33 +321,21 @@ class Database:
             WHERE LOWER(s.student_id) = LOWER(?) OR LOWER(s.name) LIKE LOWER(?) OR LOWER(s.name) LIKE LOWER(?)
             LIMIT 1
         """ if self.use_sqlite else """
-            SELECT COALESCE(s.student_id, 'STU' || s.id::text) AS student_id,
-                   s.id,
-                   COALESCE(s.name, s.student_name) AS name,
-                   COALESCE(s.student_name, s.name) AS student_name,
-                   COALESCE(d.department_name, s.course, s.department_id, 'General') AS department_name,
-                   COALESCE(s.course, d.department_name) AS course,
-                   COALESCE(s.semester, 4) AS semester,
-                   COALESCE(s.batch, '') AS batch,
-                   COALESCE(s.parent_phone, s.mobile_number, '') AS parent_phone,
-                   COALESCE(s.mobile_number, s.parent_phone, '') AS mobile_number,
-                   s.cpi,
-                   s.attendance_percentage
+            SELECT s.student_id,
+                   s.name,
+                   COALESCE(d.department_name, s.department_id, 'General') AS department_name,
+                   s.semester,
+                   COALESCE(s.parent_phone, '') AS parent_phone
             FROM students s
             LEFT JOIN departments d ON s.department_id = d.department_id
             WHERE LOWER(COALESCE(s.student_id, '')) = LOWER(%s)
-               OR s.id::text = %s
-               OR LOWER(COALESCE(s.name, s.student_name, '')) LIKE LOWER(%s)
-               OR LOWER(COALESCE(s.student_name, s.name, '')) LIKE LOWER(%s)
+               OR LOWER(COALESCE(s.name, '')) LIKE LOWER(%s)
+               OR LOWER(COALESCE(s.name, '')) LIKE LOWER(%s)
             LIMIT 1
         """
         pattern_orig = f"%{identifier}%"
         pattern_clean = f"%{clean_id}%"
-        if self.use_sqlite:
-            results = self._execute_query(query, (clean_id, pattern_clean, pattern_orig))
-        else:
-            raw_num = clean_id.replace("STU", "").replace("stu", "").strip()
-            results = self._execute_query(query, (clean_id, raw_num, pattern_clean, pattern_orig))
+        results = self._execute_query(query, (clean_id, pattern_clean, pattern_orig))
         if results:
             r = dict(results[0])
             r["student_id"] = str(r.get("student_id") or r.get("id") or "")
@@ -475,14 +453,7 @@ class Database:
 
     def get_all_student_identifiers(self) -> list[dict]:
         """Returns student_id and name for all enrolled students for fast anticipatory lookup."""
-        query = """
-            SELECT student_id, name FROM students ORDER BY student_id
-        """ if self.use_sqlite else """
-            SELECT COALESCE(student_id, 'STU' || id::text) AS student_id,
-                   COALESCE(name, student_name) AS name
-            FROM students
-            ORDER BY id
-        """
+        query = "SELECT student_id, name FROM students ORDER BY student_id"
         return self._execute_query(query)
 
     def add_student(
