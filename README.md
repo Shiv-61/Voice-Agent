@@ -157,4 +157,4 @@ python main.py --cli
 
 - **Parent (Gujarati):** *"B.Tech Computer Science ની ફી અને eligibility શું છે?"*
   - **Tool Executed:** `get_admission_info("CSE")`
-  - **Spoken Answer:** *"B.Tech CSE માટે 10+2 માં ફિઝિક્સ, કેમિસ્ટ્રી અને મેથ્સ સાથે ઓછામાં ઓછા 60% હોવા જોઈએ અને વાર્ષિક ફી ₹2,50,000 છે."*
+  - **Spoken Answer:** *"B.Tech CSE માટે 10+2 માં ફિઝિક્સ, કેમિસ્ટ્રી અને મેથ્સ સાથે ઓછામાં ઓછા 60% હોવા જોઈએ અને પ્રથમ વર્ષની વાર્ષિક ફી ₹1,66,950 છે."*

@@ -37,6 +37,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DEFAULT_DOCS = [
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "documents", "BTech_IT_2026-2030_Syllabus_File.pdf"),
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "documents", "Highlights_of_Batch_2026.pdf"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "documents", "DDU_Fees_Structure.pdf"),
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_university_policy.pdf"),
 ]
 
@@ -80,8 +81,53 @@ def extract_and_chunk_pdf(pdf_path: str, rag_store: RAGStore) -> list[dict]:
     reader = pypdf.PdfReader(pdf_path)
     chunks_list = []
     chunk_counter = 0
+    doc_id = f"doc_{hashlib.md5(filename.encode()).hexdigest()[:12]}"
 
     print(f"📖 Processing '{filename}' ({len(reader.pages)} pages)...")
+
+    # Inject high-density semantic chunks for Highlights of Batch 2026
+    if any(k in lower_fn for k in ["highlight", "2026"]) and any(k in lower_fn for k in ["batch", "highlight", "placement"]):
+        specialized = rag_store._get_highlights_semantic_chunks()
+        for item in specialized:
+            chunk_counter += 1
+            p_num = item.get("page", 1)
+            chunks_list.append({
+                "content": item["text"],
+                "source": filename,
+                "category": category,
+                "page": p_num,
+                "chunk_index": chunk_counter,
+                "metadata": {
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page": p_num,
+                    "category": category,
+                    "chunk_index": chunk_counter,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            })
+
+    # Inject high-density semantic chunks for Fees Structure
+    if any(k in lower_fn for k in ["fee", "fees"]):
+        specialized = rag_store._get_fees_structure_semantic_chunks()
+        for item in specialized:
+            chunk_counter += 1
+            p_num = item.get("page", 1)
+            chunks_list.append({
+                "content": item["text"],
+                "source": filename,
+                "category": category,
+                "page": p_num,
+                "chunk_index": chunk_counter,
+                "metadata": {
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page": p_num,
+                    "category": category,
+                    "chunk_index": chunk_counter,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            })
 
     for page_idx, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
@@ -101,6 +147,7 @@ def extract_and_chunk_pdf(pdf_path: str, rag_store: RAGStore) -> list[dict]:
                 "page": page_idx,
                 "chunk_index": chunk_counter,
                 "metadata": {
+                    "doc_id": doc_id,
                     "filename": filename,
                     "page": page_idx,
                     "category": category,

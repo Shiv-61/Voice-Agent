@@ -45,10 +45,10 @@ CREATE TABLE IF NOT EXISTS placement_stats (
 
 CREATE TABLE IF NOT EXISTS admission_info (
     id SERIAL PRIMARY KEY,
-    program VARCHAR(100) NOT NULL,
+    program VARCHAR(150) UNIQUE NOT NULL,
     eligibility TEXT NOT NULL,
-    fee_per_year VARCHAR(50) NOT NULL,
-    last_date_to_apply VARCHAR(50) NOT NULL
+    fee_per_year VARCHAR(255) NOT NULL,
+    last_date_to_apply VARCHAR(100) NOT NULL
 );
 
 -- Fix #16: Added disposition and follow_up_action columns
@@ -200,7 +200,15 @@ INSERT INTO placement_stats (year, department_id, highest_package_lpa, average_p
 ON CONFLICT DO NOTHING;
 
 INSERT INTO admission_info (program, eligibility, fee_per_year, last_date_to_apply) VALUES
-('B.Tech Computer Science (CSE)', '10+2 with Physics, Chem, Math (min 60% aggregate) + JEE Main score', '₹2,50,000 / year', '31st July 2026'),
-('B.Tech Electronics (ECE)',      '10+2 with PCM (min 55% aggregate)', '₹2,10,000 / year', '31st July 2026'),
-('M.Tech Artificial Intelligence','B.Tech/B.E. in relevant field + GATE score', '₹1,80,000 / year', '15th August 2026')
-ON CONFLICT DO NOTHING;
+('B.Tech 1st Year (Admission Year 2023-24)', '10+2 with PCM (min 60% aggregate) + GUJCET / JEE Main score', '₹1,66,950 / year', '31st July 2026'),
+('B.Tech 2nd Year (Admission Year 2022-23)', 'Completed 1st Year B.Tech / D2D Diploma to Degree', '₹1,52,000 / year', '31st July 2026'),
+('B.Tech 3rd Year (Admission Year 2021-22)', 'Completed 2nd Year B.Tech', '₹1,52,000 / year', '31st July 2026'),
+('B.Tech 4th Year (Admission Year 2020-21)', 'Completed 3rd Year B.Tech', '₹1,52,000 / year', '31st July 2026'),
+('M.Tech 1st Year (Admission Year 2023-24)', 'B.Tech/B.E. in relevant discipline + valid GATE score', '₹55,125 / year', '15th August 2026'),
+('M.Tech 2nd Year (Admission Year 2022-23)', 'Completed 1st Year M.Tech', '₹52,500 / year', '15th August 2026'),
+('B.Tech Information Technology (IT)', '10+2 with PCM (min 60% aggregate) + GUJCET / JEE Main', '₹1,66,950 / year (1st yr), ₹1,52,000 / year (2nd-4th yr)', '31st July 2026'),
+('B.Tech Computer Science (CSE)', '10+2 with PCM (min 60% aggregate) + JEE Main score', '₹1,66,950 / year (1st yr), ₹1,52,000 / year (2nd-4th yr)', '31st July 2026')
+ON CONFLICT (program) DO UPDATE SET
+    eligibility = EXCLUDED.eligibility,
+    fee_per_year = EXCLUDED.fee_per_year,
+    last_date_to_apply = EXCLUDED.last_date_to_apply;

@@ -127,8 +127,12 @@ disposition:
 # Core University Facts for instant factual answers
 university_facts:
   - "B.Tech IT/CSE Eligibility: 10+2 with Physics, Chemistry, Maths (min 60% aggregate) and JEE Main/GUJCET."
-  - "B.Tech IT/CSE Annual Fee: 2.5 lakh rupees per year. Application deadline: 31 July 2026."
-  - "Placements: 96.5% placement rate, highest package 13 lakh rupees, average 12.5 lakh rupees. Top recruiters: TCS,mastercard,ignosis, simform."
+  - "Official Annual Fee Structure: B.Tech 1st Year (Admission 2023-24) is 1,66,950 rupees per year. B.Tech 2nd, 3rd, and 4th Year is 1,52,000 rupees per year. M.Tech 1st Year (Admission 2023-24) is 55,125 rupees per year. M.Tech 2nd Year is 52,500 rupees per year. Application deadline: 31 July 2026."
+  - "Placements: 96.5% placement rate, highest package 45 lakh rupees, average 12.5 lakh rupees. Top recruiters: Google, Microsoft, Amazon, TCS, Infosys, Mastercard, Simform."
+  - "B.Tech IT 2026 Batch Placement Highlights: 108 offers, 106 students placed, 30 students opted for higher studies. Highest package: 13.4 lakh rupees per annum (13.4 LPA), Average package: 5.5 lakh rupees per annum (5.5 LPA). Package tiers: 10 students above 8 LPA, 43 students 5-8 LPA, 33 students 4-5 LPA, 20 students below 4 LPA."
+  - "Batch 2026 Competitive Exams: 29 students scored >90 percentile in GATE 2026 (CS/DA). Top scorers: Darpan Vora (AIR 596 DA, AIR 3353 CS), Dodiya Aditya (AIR 1580 DA), Sorathiya Utsav (AIR 1366 CS), Barkha Lahori (AIR 3300 CS). NCAT 2025: Patel Nisarg (AIR 35). Two students scored 110/120 in TOEFL and 90 in PTE."
+  - "Batch 2026 Hackathons: Sui Overflow 2025 Greece 1st place ($30,000 + $10,000 AWS credits, Abhimanyu Ajudiya team for SuiSign); ETHGlobal 2026 New Delhi 2nd place ($1,500, Pruthviraj Parmar, Abhimanyu Ajudiya, Sumit Mishra for SynapseModel); Codeversity 2026 IIT Gandhinagar 1st place (₹70,000, Pruthviraj Parmar, Harsh Manek for SkillScreen AI)."
+  - "Batch 2026 Research Papers: 10 student research papers presented in IEEE and international conferences during 2025-26, including Maize Grain Classification (Shreyas Warrier), Lung Cancer Detection (Om Patel), Driver Drowsiness (Lavi Garg, Parmar Charmi), and Gujarati Grammar (Kunj Patel, Nehang Patel)."
   - "Hostel: Separate for boys and girls. Curfew 9:30 PM weekdays, 10:30 PM weekends."
   - "Attendance: Minimum 75% attendance mandatory to appear in semester exams."
   - "Department Contact: Phone 0268-2520502, Email info@ddu.ac.in, Address College Road, Nadiad, Gujarat 387001."
@@ -211,8 +215,8 @@ domains:
       - Keep your spoken answer strictly to 1 or 2 concise sentences in the caller's active language.
 
   admissions_and_campus:
-    name: "Admissions, Fees & Campus Policies"
-    description: "Specialized prompt for admissions eligibility, fees, deadlines, hostel curfew, and placements."
+    name: "Admissions, Fees, Placements & Batch Highlights"
+    description: "Specialized prompt for admissions eligibility, fees, deadlines, hostel curfew, placements, and batch 2026 achievements."
     keywords:
       - "admission"
       - "eligibility"
@@ -227,6 +231,15 @@ domains:
       - "package"
       - "salary"
       - "recruiter"
+      - "hackathon"
+      - "gate"
+      - "research"
+      - "paper"
+      - "highlight"
+      - "highlights"
+      - "2026"
+      - "offers"
+      - "placed"
       - "प्रवेश"
       - "दाखिला"
       - "फीस"
@@ -234,11 +247,23 @@ domains:
       - "પ્લેસમેન્ટ"
       - "એડમિશન"
       - "ફી"
+      - "હેકાથોન"
+      - "હાઈલાઈટ્સ"
+      - "ગેટ"
+      - "રિસર્ચ"
+      - "हैकथॉन"
+      - "हाइलाइट्स"
+      - "गेट"
+      - "रिसर्च"
     instruction: |
       [ACTIVE DIRECTIVE: ADMISSIONS & CAMPUS LIFE]
-      - Answer admission eligibility, annual fees (2.5 lakh rupees/year), cutoff, and deadlines (31 July 2026).
+      - Answer admission eligibility, annual fees (B.Tech 1st year: 1,66,950 rupees/year; B.Tech 2nd to 4th year: 1,52,000 rupees/year; M.Tech 1st year: 55,125 rupees/year; M.Tech 2nd year: 52,500 rupees/year), cutoff, and deadlines (31 July 2026).
       - For hostel: State clearly that separate hostels are available for boys and girls, with 9:30 PM weekday curfew and 10:30 PM weekend curfew.
-      - For placements: Highlight the 96.5% placement rate, highest package of 45 lakh rupees, and 12.5 lakh average package.
+      - For 2026 Batch Placements: State 108 offers, 106 students placed, 30 opted for higher studies, highest package 13.4 LPA, and average package 5.5 LPA.
+      - For Hackathons: State Sui Overflow 2025 1st place ($30,000 + $10k AWS credits, Abhimanyu Ajudiya team), ETHGlobal 2026 2nd place ($1,500), Codeversity IIT Gandhinagar 1st place (₹70,000, Pruthviraj Parmar, Harsh Manek).
+      - For Competitive Exams: 29 students scored >90 percentile in GATE 2026 (topper Darpan Vora AIR 596 DA, AIR 3353 CS).
+      - For Research Papers: 10 papers presented in IEEE/international conferences.
+      - Keep your spoken answer strictly to 1 or 2 concise sentences in the caller's active language.
 
 # =============================================================================
 # Tool Calling Signatures & Execution Guardrails

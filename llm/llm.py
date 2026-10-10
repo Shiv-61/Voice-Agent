@@ -78,12 +78,17 @@ def get_shared_rag():
 _MULTILINGUAL_EXPANSIONS = {
     r'(?:admission|एडमिशन|प्रवेश|दाखिला|દાખલ|એડમિશન|apply|आवेदन|અરજી)': 'admission apply eligibility requirements',
     r'(?:eligibility|एलिजिबिलिटी|पात्रता|લાયકાત|eligible|योग्य)': 'eligibility criteria requirements percentage',
-    r'(?:fees?|फी|फीस|शुल्क|ખર્ચ|ફી|cost)': 'fee structure tuition fees annual',
+    r'(?:fees?|fee structure|फी|फीસ|शुल्क|ખર્ચ|ફી|cost)': 'fee structure tuition fees annual 166950 152000 55125 52500 1st year 2nd year B.Tech M.Tech',
+    r'(?:m\.?tech|एमटेक|एम\.टेक|એમટેક|એમ\.ટેક)': 'M.Tech Master of Technology postgraduate fee structure 55125 52500',
     r'(?:b\.?tech|बीटेक|बी\.टेक|બીટેક|engineering|इंजीनियरिंग)': 'B.Tech Bachelor of Technology Engineering',
     r'(?:cse|it|computer|कम्प्यूटर|कंप्यूटर|કોમ્પ્યુટર|ઇન્ફોર્મેશન)': 'Computer Science Engineering Information Technology IT',
     r'(?:ddu|डीडीयू|धर्मसिंह|ધરમસિંહ)': 'DDU Dharamsinh Desai University Nadiad',
     r'(?:attendance|अटेंडेंस|हाजिरी|उपस्थिति|હાજરી)': 'attendance policy minimum percentage rules',
     r'(?:placement|प्लेसमेंट|नौकरी|पैकेज|सैलरी|પ્લેસમેન્ટ|salary|package)': 'placement highest average package recruiters companies',
+    r'(?:batch\s*2026|2026\s*batch|૨૦૨૬|2026|highlights?|statistics?|summary|હાઈલાઈટ્સ|हाइलाइट्स)': 'Highlights of B.Tech IT 2026 Batch placement summary offers 108 106 placed highest salary 13.4 LPA average 5.5 LPA higher studies 30',
+    r'(?:hackathons?|હેકાથોન|हैकथॉन|suisign|skillscreen|synapsemodel|competition|competitions|ઈનામ|पुरस्कार)': 'hackathon Sui Overflow ETHGlobal Codeversity prize winner Abhimanyu Ajudiya Pruthviraj Parmar Harsh Manek Sumit Mishra project',
+    r'(?:gate|ncat|ielts|toefl|pte|ગેટ|પર્સન્ટાઈલ|गेट|रैंक|percentile|air|rank)': 'GATE NCAT IELTS TOEFL PTE percentile rank AIR Darpan Vora Dodiya Aditya Sorathiya Utsav Barkha Lahori Patel Nisarg competitive exam toppers',
+    r'(?:research|paper|papers|publication|conference|conferences|રિસર્ચ|પેપર|સંશોધન|रिसर्च|पेपर|शोध|सम्मेलन)': 'research papers conference presented by students Shreyas Warrier Om Patel Lavi Garg Gaurang Agrawal Nitya Dhagat Devanshie Patel Deep Govindvira Govinda Prajapati Harmit Patel Kunj Patel',
     r'(?:hostel|हॉस्टल|छात्रावास|હોસ્ટેલ)': 'hostel timings curfew accommodation rules',
     r'(?:scholarship|स्कॉलरशिप|छात्रवृत्ति|સ્કોલરશિપ)': 'scholarship merit financial aid',
     r'(?:syllabus|curriculum|subjects?|સબ્જેક્ટ|સબ્જેક્ટ્સ|સબજેક્ટ|સબજેક્ટ્સ|વિષય|વિષયો|સિલેબસ|અભ્યાસક્રમ|सिलेबस|पाठ्यक्रम)': 'syllabus curriculum subjects examination scheme',
@@ -371,9 +376,11 @@ class LLM:
                 "एडमिशन", "प्रवेश", "दाखिला", "फी", "फीस", "शुल्क", "पात्रता", "एलिजिबिलिटी",
                 "बीटेक", "बी.टेक", "એડમિશન", "ફી", "લાયકાત"
             ]):
-                prog = "CSE" if any(p in lower_text for p in [
-                    "cse", "computer", "it", "btech", "b.tech", "बीटेक", "बी.टेक", "कंप्यूटर", "કોમ્પ્યુટર", "બીટેક"
-                ]) else "ECE" if any(p in lower_text for p in ["ece", "electronics", "ईसीई", "इलेक्ट्रॉनिक्स"]) else ""
+                prog = "M.Tech" if any(p in lower_text for p in [
+                    "mtech", "m.tech", "एमटेक", "एम.टेक", "એમટેક", "એમ.ટેક"
+                ]) else "B.Tech" if any(p in lower_text for p in [
+                    "cse", "computer", "it", "btech", "b.tech", "બીટેક", "બી.ટેક", "कंप्यूटर", "કોમ્પ્યુટર", "बीटेक", "बी.टेक"
+                ]) else ""
                 adm = self.db.get_admission_info(prog)
                 if adm:
                     context_snippets.append(f"[Official Admission & Fee Records]: {json.dumps(adm, default=str)}")
@@ -385,8 +392,8 @@ class LLM:
         if not (is_personal_student_query and not student):
             try:
                 rag_query = expand_multilingual_query(clean_user_text)
-                matches = self.rag.query_documents(rag_query, n_results=4)
-                if matches and matches[0].get("similarity_score", 0) >= 0.50:
+                matches = self.rag.query_documents(rag_query, n_results=4, min_similarity=0.25)
+                if matches and matches[0].get("similarity_score", 0) >= 0.25:
                     for m in matches:
                         text_snippet = m.get("text", "").strip()
                         if text_snippet:
@@ -719,13 +726,23 @@ class LLM:
                                 elif "TOOL_CALL:".startswith(stripped):
                                     continue
                                 else:
-                                    has_punct = any(p in stream_buffer for p in [".", "!", "?", "।", "\n"])
-                                    min_len = 35 if hold_phrase_yielded and not checked_hold_dedup else 12
-                                    if (has_punct or len(stripped) >= min_len) and "TOOL_CALL:" not in stream_buffer:
-                                        if hold_phrase_yielded and not checked_hold_dedup:
+                                    if hold_phrase_yielded and not checked_hold_dedup:
+                                        if not stripped:
+                                            continue
+                                        if HOLD_PHRASE_REGEX.match(stripped):
+                                            stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
                                             checked_hold_dedup = True
-                                            if HOLD_PHRASE_REGEX.match(stripped):
-                                                stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
+                                            stripped = stream_buffer.lstrip()
+                                            if not stripped:
+                                                stream_buffer = ""
+                                                continue
+                                        elif len(stripped) >= 35 or any(p in stripped for p in [".", "!", "?", "।"]):
+                                            checked_hold_dedup = True
+                                        else:
+                                            continue
+
+                                    has_punct = any(p in stream_buffer for p in [".", "!", "?", "।", "\n"])
+                                    if (has_punct or len(stripped) >= 12) and "TOOL_CALL:" not in stream_buffer:
                                         if is_prompt_leak(stream_buffer):
                                             print(f"🛑 [llm] Suppressed prompt leak buffer in stream: {stream_buffer}")
                                             stream_buffer = ""
@@ -813,11 +830,11 @@ class LLM:
                                     clean_text = "DDU IT Semester 1 includes Mathematics-1, Basic Programming, and Engineering fundamentals. Would you like specific details on subjects or credits?"
                             elif any(w in lower_u for w in ["fee", "fees", "ફી", "ખર્ચ", "फी", "फीस"]):
                                 if turn_lang == "gu":
-                                    clean_text = "ડીડીયુ બીટેક આઈટીની વાર્ષિક ટ્યુશન ફી ૨.૫ લાખ રૂપિયા છે અને અરજી કરવાની છેલ્લી તારીખ ૩૧ જુલાઈ ૨૦૨૬ છે."
+                                    clean_text = "ડીડીયુ બીટેક પ્રથમ વર્ષની વાર્ષિક ટ્યુશન ફી ૧,૬૬,૯૫૦ રૂપિયા અને બીજાથી ચોથા વર્ષ માટે ૧,૫૨,૦૦૦ રૂપિયા છે, જ્યારે એમટેક પ્રથમ વર્ષની ફી ૫૫,૧૨૫ રૂપિયા છે."
                                 elif turn_lang == "hi":
-                                    clean_text = "डीडीयू बी.टेक आईटी की वार्षिक ट्यूशन फीस 2.5 लाख रुपये है और आवेदन की अंतिम तिथि 31 जुलाई 2026 है।"
+                                    clean_text = "डीडीयू बी.टेक प्रथम वर्ष की वार्षिक ट्यूशन फीस 1,66,950 रुपये और 2nd से 4th वर्ष के लिए 1,52,000 रुपये है, जबकि एम.टेक प्रथम वर्ष की 55,125 रुपये है।"
                                 else:
-                                    clean_text = "The annual tuition fee for DDU B.Tech IT is 2.5 lakh rupees, and the application deadline is 31 July 2026."
+                                    clean_text = "DDU B.Tech first year annual fee is 1,66,950 rupees, and second to fourth year is 1,52,000 rupees per year. M.Tech first year is 55,125 rupees per year."
                             elif any(w in lower_u for w in ["placement", "પ્લેસમેન્ટ", "प्लेसमेंट", "salary", "package"]):
                                 if turn_lang == "gu":
                                     clean_text = "ડીડીયુ આઈટીમાં પ્લેસમેન્ટ દર ૯૬.૫% છે, જેમાં સૌથી વધુ પેકેજ ૪૫ લાખ રૂપિયા અને સરેરાશ ૧૨.૫ લાખ રૂપિયા છે."
@@ -933,13 +950,23 @@ class LLM:
                                 elif "TOOL_CALL:".startswith(stripped):
                                     continue
                                 else:
-                                    has_punct = any(p in stream_buffer for p in [".", "!", "?", "।", "\n"])
-                                    min_len = 35 if hold_phrase_yielded and not checked_hold_dedup else 12
-                                    if (has_punct or len(stripped) >= min_len) and "TOOL_CALL:" not in stream_buffer:
-                                        if hold_phrase_yielded and not checked_hold_dedup:
+                                    if hold_phrase_yielded and not checked_hold_dedup:
+                                        if not stripped:
+                                            continue
+                                        if HOLD_PHRASE_REGEX.match(stripped):
+                                            stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
                                             checked_hold_dedup = True
-                                            if HOLD_PHRASE_REGEX.match(stripped):
-                                                stream_buffer = HOLD_PHRASE_REGEX.sub("", stripped, count=1)
+                                            stripped = stream_buffer.lstrip()
+                                            if not stripped:
+                                                stream_buffer = ""
+                                                continue
+                                        elif len(stripped) >= 35 or any(p in stripped for p in [".", "!", "?", "।"]):
+                                            checked_hold_dedup = True
+                                        else:
+                                            continue
+
+                                    has_punct = any(p in stream_buffer for p in [".", "!", "?", "।", "\n"])
+                                    if (has_punct or len(stripped) >= 12) and "TOOL_CALL:" not in stream_buffer:
                                         if is_prompt_leak(stream_buffer):
                                             print(f"🛑 [llm] Suppressed prompt leak buffer in async stream: {stream_buffer}")
                                             stream_buffer = ""
@@ -1027,11 +1054,11 @@ class LLM:
                                     clean_text = "DDU IT Semester 1 includes Mathematics-1, Basic Programming, and Engineering fundamentals. Would you like specific details on subjects or credits?"
                             elif any(w in lower_u for w in ["fee", "fees", "ફી", "ખર્ચ", "फी", "फीस"]):
                                 if turn_lang == "gu":
-                                    clean_text = "ડીડીયુ બીટેક આઈટીની વાર્ષિક ટ્યુશન ફી ૨.૫ લાખ રૂપિયા છે અને અરજી કરવાની છેલ્લી તારીખ ૩૧ જુલાઈ ૨૦૨૬ છે."
+                                    clean_text = "ડીડીયુ બીટેક પ્રથમ વર્ષની વાર્ષિક ટ્યુશન ફી ૧,૬૬,૯૫૦ રૂપિયા અને બીજાથી ચોથા વર્ષ માટે ૧,૫૨,૦૦૦ રૂપિયા છે, જ્યારે એમટેક પ્રથમ વર્ષની ફી ૫૫,૧૨૫ રૂપિયા છે."
                                 elif turn_lang == "hi":
-                                    clean_text = "डीडीयू बी.टेक आईटी की वार्षिक ट्यूशन फीस 2.5 लाख रुपये है और आवेदन की अंतिम तिथि 31 जुलाई 2026 है।"
+                                    clean_text = "डीडीयू बी.टेक प्रथम वर्ष की वार्षिक ट्यूशन फीस 1,66,950 रुपये और 2nd से 4th वर्ष के लिए 1,52,000 रुपये है, जबकि एम.टेक प्रथम वर्ष की 55,125 रुपये है।"
                                 else:
-                                    clean_text = "The annual tuition fee for DDU B.Tech IT is 2.5 lakh rupees, and the application deadline is 31 July 2026."
+                                    clean_text = "DDU B.Tech first year annual fee is 1,66,950 rupees, and second to fourth year is 1,52,000 rupees per year. M.Tech first year is 55,125 rupees per year."
                             elif any(w in lower_u for w in ["placement", "પ્લેસમેન્ટ", "प्लेसमेंट", "salary", "package"]):
                                 if turn_lang == "gu":
                                     clean_text = "ડીડીયુ આઈટીમાં પ્લેસમેન્ટ દર ૯૬.૫% છે, જેમાં સૌથી વધુ પેકેજ ૪૫ લાખ રૂપિયા અને સરેરાશ ૧૨.૫ લાખ રૂપિયા છે."

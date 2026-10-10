@@ -303,17 +303,35 @@ def query_needs_db_or_rag(text: str, has_student: bool = False) -> bool:
     if any(k in lower for k in adm_keywords):
         return True
 
-    # 3. Placement records
+    # 3. Placement records & Batch 2026 highlights
     placement_keywords = [
         "placement", "placements", "package", "salary", "recruiter", "recruiters",
         "highest package", "average package", "placed", "company", "companies",
-        "પ્લેસમેન્ટ", "પેકેજ", "નોકરી", "કંપની",
-        "प्लेसमेंट", "पैकेज", "सैलरी", "नौकरी", "कंपनी", "कंपनियां",
+        "batch 2026", "2026 batch", "offers", "higher studies", "lpa",
+        "પ્લેસમેન્ટ", "પેકેજ", "નોકરી", "કંપની", "ઓફર", "હાઈલાઈટ્સ", "૨૦૨૬", "સૌથી વધુ", "સરેરાશ",
+        "प्लेसमेंट", "पैकेज", "सैलरी", "नौकरी", "कंपनी", "कंपनियां", "ऑफर", "हाइलाइट्स", "2026", "उच्चतम", "औसत",
     ]
     if any(k in lower for k in placement_keywords):
         return True
 
-    # 4. Curriculum, Syllabus, Hostel, Policy documents (RAG)
+    # 4. Student Achievements, Hackathons, Competitive Exams & Research Papers
+    achievement_keywords = [
+        "hackathon", "hackathons", "sui overflow", "ethglobal", "codeversity",
+        "suisign", "synapsemodel", "skillscreen", "prize", "prizes", "award", "awards",
+        "competition", "competitions", "achievement", "achievements",
+        "gate", "ncat", "ielts", "toefl", "pte", "percentile", "air", "rank",
+        "research", "paper", "papers", "publication", "publications", "conference", "conferences",
+        "journal", "darpan vora", "abhimanyu", "pruthviraj", "harsh manek",
+        "shreyas warrier", "om patel",
+        "હેકાથોન", "હરીફાઈ", "પુરસ્કાર", "ઇનામ", "સિદ્ધિ", "ગેટ", "ટોફલ", "પર્સન્ટાઈલ",
+        "રિસર્ચ", "પેપર", "સંશોધન", "કોન્ફરન્સ",
+        "हैकथॉन", "प्रतियोगिता", "पुरस्कार", "उपलब्धि", "गेट", "टोफेल", "रैंक", "पर्सेंटाइल",
+        "रिसर्च", "पेपर", "शोध", "सम्मेलन",
+    ]
+    if any(k in lower for k in achievement_keywords):
+        return True
+
+    # 5. Curriculum, Syllabus, Hostel, Policy documents (RAG)
     rag_keywords = [
         "syllabus", "curriculum", "subject", "subjects", "semester", "credit", "credits",
         "course structure", "teaching scheme", "exam", "examination",

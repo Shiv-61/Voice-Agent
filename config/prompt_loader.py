@@ -117,7 +117,7 @@ def detect_active_domains(user_text: str, retrieved_docs: Optional[list[dict[str
                 active.add("student_records")
             if category == "college_curriculum" or any(k in filename or k in text_snippet[:200] for k in ["curriculum", "syllabus", "subject", "semester", "credit", "course"]):
                 active.add("college_curriculum")
-            if category in ("admissions", "campus") or any(k in filename for k in ["admission", "fee", "hostel", "placement"]):
+            if category in ("admissions", "campus", "admissions_and_campus", "placements_and_achievements") or any(k in filename or k in text_snippet[:200] for k in ["admission", "fee", "hostel", "placement", "hackathon", "gate", "achievement"]):
                 active.add("admissions_and_campus")
 
     return list(active)
