@@ -120,21 +120,25 @@ class STT:
             target_lang = self._whisper_lang(language_code)
             bio = io.BytesIO(audio_bytes)
 
-            # Enable vad_filter with fallback to reduce background noise hallucinations
+            # Enable vad_filter with greedy low-latency decoding
             try:
                 segments, info = whisper_model.transcribe(
                     bio,
                     language=target_lang,
-                    beam_size=5,
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0.0,
                     vad_filter=True,
-                    vad_parameters={"min_silence_duration_ms": 300},
+                    vad_parameters={"min_silence_duration_ms": 250},
                 )
             except Exception:
                 bio.seek(0)
                 segments, info = whisper_model.transcribe(
                     bio,
                     language=target_lang,
-                    beam_size=5,
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0.0,
                     vad_filter=False,
                 )
             transcript = " ".join(s.text.strip() for s in segments if s.text).strip()

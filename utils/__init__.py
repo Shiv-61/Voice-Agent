@@ -15,6 +15,8 @@ from .text_utils import (
     HOLD_PHRASES,
     HOLD_PHRASE_REGEX,
     query_needs_db_or_rag,
+    SILENCE_CHECK_PROMPTS,
+    FAREWELL_PROMPTS,
 )
 from .audio_utils import mulaw_to_pcm16_16k, pcm16_16k_to_mulaw
 
@@ -32,6 +34,8 @@ __all__ = [
     "HOLD_PHRASES",
     "HOLD_PHRASE_REGEX",
     "query_needs_db_or_rag",
+    "SILENCE_CHECK_PROMPTS",
+    "FAREWELL_PROMPTS",
     "mulaw_to_pcm16_16k",
     "pcm16_16k_to_mulaw",
 ]

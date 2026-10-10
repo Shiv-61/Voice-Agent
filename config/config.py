@@ -65,6 +65,13 @@ DATABASE_URL = os.getenv(
     "postgresql://postgres:postgres@localhost:5432/university_agent",
 )
 
+# ---- MongoDB (Call Transcripts & History) ----
+MONGODB_URI = os.getenv(
+    "MONGODB_URI",
+    "mongodb+srv://Temp-user:shivgowda%40448@cluster0.llp7ahv.mongodb.net/?appName=Cluster0",
+)
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "voice_agent")
+
 # ---- Server & Network (Render & Local) ----
 WS_HOST = os.getenv("HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("PORT", "8765"))

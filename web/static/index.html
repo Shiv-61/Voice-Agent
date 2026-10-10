@@ -279,11 +279,12 @@
                       <th scope="col">College Intent & Lead</th>
                       <th scope="col">Executive Summary</th>
                       <th scope="col">Time</th>
+                      <th scope="col">Transcript</th>
                     </tr>
                   </thead>
                   <tbody id="callHistoryBody">
                     <tr>
-                      <td colspan="6" class="muted">
+                      <td colspan="7" class="muted">
                         No calls yet. Press Start voice call to begin.
                       </td>
                     </tr>
@@ -291,8 +292,47 @@
                 </table>
               </div>
               <p class="hint">
-                Each voice call is logged automatically with its questions.
+                Each voice call is logged automatically with its questions and full transcript.
               </p>
+            </div>
+
+            <!-- Recent Call Transcripts (MongoDB) -->
+            <div class="card" style="margin-top: 24px;">
+              <div class="card-head">
+                <div>
+                  <h2 class="h2">Recent Call Transcripts (MongoDB)</h2>
+                  <p class="muted">Latest 10 voice call dialogues fetched directly from MongoDB Atlas.</p>
+                </div>
+                <button
+                  id="refreshTranscriptsBtn"
+                  class="icon-btn"
+                  title="Refresh transcripts"
+                >
+                  Refresh
+                </button>
+              </div>
+              <div class="table-wrap">
+                <table class="table" id="transcriptsTable">
+                  <thead>
+                    <tr>
+                      <th scope="col">Call ID</th>
+                      <th scope="col">Caller</th>
+                      <th scope="col">Language</th>
+                      <th scope="col">Duration</th>
+                      <th scope="col">Turns</th>
+                      <th scope="col">Time</th>
+                      <th scope="col">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="transcriptsBody">
+                    <tr>
+                      <td colspan="7" class="muted">
+                        Loading recent transcripts from MongoDB...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </section>
@@ -866,6 +906,32 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=4.2"></script>
+    <!-- Modal: View Call Transcript (MongoDB) -->
+    <div
+      id="transcriptModal"
+      class="modal-backdrop"
+      style="display: none"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="transcriptModalTitle"
+    >
+      <div class="modal modal-wide" style="max-width: 680px; max-height: 85vh; display: flex; flex-direction: column;">
+        <div class="modal-head" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
+          <div>
+            <h3 id="transcriptModalTitle" class="h3" style="margin: 0;">Call Transcript</h3>
+            <p id="transcriptModalMeta" class="muted small" style="margin: 4px 0 0 0;"></p>
+          </div>
+          <button id="closeTranscriptModalBtn" class="icon-btn" aria-label="Close">✕</button>
+        </div>
+        <div id="transcriptModalBody" style="overflow-y: auto; flex: 1; padding: 8px 0; display: flex; flex-direction: column; gap: 10px;">
+          <!-- Turns inserted dynamically -->
+        </div>
+        <div class="modal-actions" style="margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; display: flex; justify-content: flex-end;">
+          <button type="button" id="closeTranscriptModalActionBtn" class="btn">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js?v=4.3"></script>
   </body>
 </html>

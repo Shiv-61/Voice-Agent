@@ -37,7 +37,10 @@ from utils import (
     is_prompt_leak,
     is_noise_hallucination,
     is_filler_phrase,
+    SILENCE_CHECK_PROMPTS,
+    FAREWELL_PROMPTS,
 )
+from db import get_shared_mongo_store
 
 
 # Initialize application
@@ -392,6 +395,84 @@ async def get_call_history(limit: int = 50):
 
 
 # -----------------------------------------------------------------------------
+# REST API: Call Transcripts (MongoDB with Postgres fallback)
+# -----------------------------------------------------------------------------
+
+@app.get("/api/transcripts/recent")
+async def get_recent_transcripts(limit: int = 10):
+    """
+    Fetches the recent 10 call transcripts from MongoDB (with Postgres fallback).
+    """
+    mongo_store = get_shared_mongo_store()
+    transcripts = mongo_store.get_recent_transcripts(limit=max(1, min(limit, 50)))
+    if transcripts:
+        return {"transcripts": transcripts, "source": "mongodb", "total": len(transcripts)}
+
+    # Fallback: synthesize from Postgres call_history if MongoDB is empty or offline
+    calls = db.get_call_history(limit=limit)
+    fallback_transcripts = []
+    for c in calls:
+        cid = c.get("call_id")
+        queries = []
+        try:
+            queries = json.loads(c.get("queries_json") or "[]")
+        except Exception:
+            queries = []
+        turns = []
+        lines = []
+        for q in queries:
+            role = q.get("role", "user")
+            text = q.get("text", "")
+            turns.append({"role": role, "text": text})
+            lines.append(f"{'User' if role == 'user' else 'Priya'}: {text}")
+        fallback_transcripts.append({
+            "call_id": cid,
+            "caller_number": c.get("caller_number", "Web"),
+            "language": c.get("language", "gu-IN"),
+            "duration_seconds": c.get("duration_seconds", 0),
+            "status": "completed",
+            "turn_count": len(turns),
+            "turns": turns,
+            "full_transcript": "\n".join(lines),
+            "created_at": c.get("started_at"),
+        })
+    return {"transcripts": fallback_transcripts, "source": "postgres_fallback", "total": len(fallback_transcripts)}
+
+
+@app.get("/api/transcripts/{call_id}")
+async def get_call_transcript_detail(call_id: str):
+    """Returns full transcript dialogue for a given call ID."""
+    mongo_store = get_shared_mongo_store()
+    doc = mongo_store.get_transcript_by_call_id(call_id)
+    if doc:
+        return {"transcript": doc, "source": "mongodb"}
+
+    turns = db.get_call_queries(call_id)
+    call_log = None
+    try:
+        calls = db.get_call_history(limit=100)
+        call_log = next((c for c in calls if c.get("call_id") == call_id), None)
+    except Exception as e:
+        print(f"[transcripts] Notice fetching call history: {e}")
+
+    if turns or call_log:
+        formatted = [{"role": t.get("role", "user"), "text": t.get("query_text", "")} for t in (turns or [])]
+        caller = call_log.get("caller_number", "Caller") if call_log else "Caller"
+        dur = call_log.get("duration", 0) if call_log else 0
+        return {
+            "transcript": {
+                "call_id": call_id,
+                "caller_number": caller,
+                "duration_seconds": dur,
+                "turns": formatted,
+                "full_transcript": "\n".join(f"{'User' if t.get('role') == 'user' else 'Priya'}: {t.get('query_text', '')}" for t in formatted) if formatted else "(No spoken turns recorded)",
+            },
+            "source": "postgres_fallback",
+        }
+    return JSONResponse(status_code=404, content={"error": "Transcript not found"})
+
+
+# -----------------------------------------------------------------------------
 # WebSocket: Real-time Voice & Text Call Gateway
 # -----------------------------------------------------------------------------
 
@@ -411,7 +492,74 @@ class WebVoiceSession:
         self.caller_number = "Web"
         self.last_filler_time = 0.0
         self._turn_buffer: list[dict] = []  # Fix #12: buffer turns, bulk-flush at end
+        self.is_processing = False
+        self.last_user_activity = 0.0
+        self.silence_prompt_active = False
+        self.inactivity_task = asyncio.create_task(self._inactivity_watchdog())
         self._hook_llm_tools()
+
+    async def _inactivity_watchdog(self):
+        """Monitors 7s silence inactivity in active web call sessions."""
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                if not self.call_id or self.is_processing:
+                    continue
+                now = asyncio.get_running_loop().time()
+                if self.last_user_activity == 0.0:
+                    self.last_user_activity = now
+                    continue
+
+                idle = now - self.last_user_activity
+                if not self.silence_prompt_active:
+                    if idle >= 7.0:
+                        print("⏱️ [web-ws] 7s silence detected. Asking: 'kya aap abhi bhi line par hai'")
+                        self.silence_prompt_active = True
+                        self.last_user_activity = asyncio.get_running_loop().time()
+                        cur_l = getattr(self.llm, "current_lang", "gu")
+                        prompt_text = SILENCE_CHECK_PROMPTS.get(cur_l, SILENCE_CHECK_PROMPTS["gu"])
+                        bcp47 = self.language_code
+                        await self.send_json_safe({
+                            "event": "agent_partial_text",
+                            "text": prompt_text,
+                        })
+                        audio = await asyncio.to_thread(self.tts.synthesize, prompt_text, bcp47)
+                        if audio:
+                            await self.send_bytes_safe(audio)
+                        await self.send_json_safe({
+                            "event": "agent_done",
+                            "full_text": prompt_text,
+                            "language": bcp47,
+                            "call_hangup": False,
+                        })
+                else:
+                    if idle >= 7.0:
+                        print("⏱️ [web-ws] Inactivity timeout: No response after 7s prompt. Hanging up call.")
+                        cur_l = getattr(self.llm, "current_lang", "gu")
+                        farewell_text = FAREWELL_PROMPTS.get(cur_l, FAREWELL_PROMPTS["gu"])
+                        bcp47 = self.language_code
+                        audio = await asyncio.to_thread(self.tts.synthesize, farewell_text, bcp47)
+                        if audio:
+                            await self.send_bytes_safe(audio)
+                        await self.send_json_safe({
+                            "event": "agent_done",
+                            "full_text": farewell_text,
+                            "language": bcp47,
+                            "call_hangup": True,
+                        })
+                        await asyncio.sleep(1.5)
+                        await self.send_json_safe({
+                            "event": "call_ended",
+                            "call_hangup": True,
+                            "reason": "Inactivity timeout (no response after 7s check)",
+                        })
+                        self.end_call_log()
+                        await fire_hangup_url(call_id=self.call_id, caller_num="Web Portal", reason="inactivity_timeout")
+                        break
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[web-ws] Inactivity watchdog notice: {e}")
 
     async def send_json_safe(self, data: dict):
         """Thread-safe and concurrency-safe JSON transmission over WebSocket."""
@@ -447,10 +595,13 @@ class WebVoiceSession:
                 caller_number=self.caller_number,
                 language=self.language_code,
             )
+            self.last_user_activity = asyncio.get_running_loop().time()
         return self.call_id
 
     def end_call_log(self):
-        """Closes the session's open call log entry and runs async post-call CRM extraction."""
+        """Closes the session's open call log entry, saves transcript to MongoDB, and runs async post-call CRM extraction."""
+        if hasattr(self, "inactivity_task") and self.inactivity_task and not self.inactivity_task.done():
+            self.inactivity_task.cancel()
         if self.call_id:
             cid = self.call_id
             # Fix #12: single bulk flush instead of N per-turn writes
@@ -458,6 +609,23 @@ class WebVoiceSession:
                 db.flush_queries_bulk(cid, self._turn_buffer)
                 self._turn_buffer = []
             db.log_call_end(cid)
+            try:
+                mongo_store = get_shared_mongo_store()
+                turns_formatted = []
+                for h in self.llm.history:
+                    turns_formatted.append({
+                        "role": h.get("role", "user"),
+                        "text": h.get("content", ""),
+                    })
+                mongo_store.save_call_transcript(
+                    call_id=cid,
+                    caller_number=self.caller_number,
+                    turns=turns_formatted,
+                    language=self.language_code,
+                    status="completed",
+                )
+            except Exception as me:
+                print(f"[web-ws] Mongo transcript save notice: {me}")
             self.call_id = None
             try:
                 from intelligence.post_call import analyze_and_record_call
@@ -499,6 +667,10 @@ class WebVoiceSession:
         """Processes a transcribed or typed query through LLM, tools, and TTS streaming."""
         if not user_text.strip():
             return
+
+        self.is_processing = True
+        self.silence_prompt_active = False
+        self.last_user_activity = asyncio.get_running_loop().time()
 
         # Dynamically determine the active turn language for TTS and UI synchronization
         turn_lang, bcp47, _ = self.llm.detect_turn_language(user_text, self.language_code, stt_lang=detected_lang)
@@ -597,6 +769,8 @@ class WebVoiceSession:
                     "call_hangup": True,
                     "reason": "Agent concluded conversation with farewell",
                 })
+                self.end_call_log()
+                await fire_hangup_url(call_id=self.call_id, caller_num="Web Portal", reason="caller_hangup_requested")
         except asyncio.CancelledError:
             print("🛑 [web-ws] Active query pipeline cancelled due to user barge-in.")
             for t in list(self.pending_synth_tasks):
@@ -604,6 +778,9 @@ class WebVoiceSession:
                     t.cancel()
             self.pending_synth_tasks.clear()
             raise
+        finally:
+            self.is_processing = False
+            self.last_user_activity = asyncio.get_running_loop().time()
 
     async def process_audio_payload(self, audio_bytes: bytes):
         """Transcribes input audio bytes and runs pipeline."""
@@ -982,6 +1159,23 @@ async def hangup_endpoint(request: Request):
         try:
             db.log_call_end(call_uuid)
             try:
+                turns = db.get_call_queries(call_uuid)
+                if turns:
+                    mongo_store = get_shared_mongo_store()
+                    turns_formatted = [
+                        {"role": t.get("role", "user"), "text": t.get("query_text", "")}
+                        for t in turns
+                    ]
+                    mongo_store.save_call_transcript(
+                        call_id=call_uuid,
+                        caller_number=caller_num or "Telephony",
+                        turns=turns_formatted,
+                        duration_seconds=float(duration),
+                        status="completed",
+                    )
+            except Exception as me:
+                print(f"[hangup-webhook] Mongo transcript save notice: {me}")
+            try:
                 from intelligence.post_call import analyze_and_record_call
                 turns = db.get_call_queries(call_uuid)
                 if turns:
@@ -1005,6 +1199,31 @@ async def hangup_endpoint(request: Request):
             "hangup_cause": hangup_cause,
         },
     )
+
+
+async def fire_hangup_url(call_id: str, caller_num: str = "Telephony", reason: str = "normal_clearing", duration: int = 0):
+    """
+    Fires the hangup URL webhook (/api/vobiz/hangup) to record call conclusion,
+    update metrics in Postgres, and persist transcripts in MongoDB.
+    """
+    if not call_id:
+        return
+    try:
+        import httpx
+        port = config.WS_PORT
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                f"http://127.0.0.1:{port}/api/vobiz/hangup",
+                data={
+                    "CallUUID": call_id,
+                    "From": caller_num or "Telephony",
+                    "Duration": str(duration),
+                    "HangupCause": reason,
+                }
+            )
+            print(f"🔥 [telephony] Hangup URL fired successfully for CallUUID={call_id} (reason: {reason})")
+    except Exception as e:
+        print(f"⚠️ [telephony] Notice firing hangup URL: {e}")
 
 
 @app.websocket("/ws/vobiz")
@@ -1033,6 +1252,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     # Fix #20: asyncio.Event replaces nonlocal bool for thread-safe is_playing tracking
     stream_id = None
     call_id = None
+    caller_num = "Telephony"
     audio_chunks: list[bytes] = []
     pre_speech_buffer: collections.deque = collections.deque(maxlen=12)  # ~240ms of pre-speech audio
     is_speech_active = False
@@ -1044,6 +1264,55 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     audio_queue: asyncio.Queue = asyncio.Queue()
     is_playing_event = asyncio.Event()  # set = currently playing audio
     is_mulaw = True  # Dynamically updated on 'start' event; default is standard telephony mu-law
+    last_user_activity = 0.0
+    silence_prompt_active = False
+    inactivity_task = None
+
+    async def telephony_inactivity_monitor():
+        """Monitors 7s silence inactivity during live telephone calls."""
+        nonlocal silence_prompt_active, last_user_activity, stream_id, call_id, caller_num
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                now = asyncio.get_running_loop().time()
+                if last_user_activity == 0.0:
+                    continue
+                # If audio is playing to caller, audio is queued, or caller is speaking:
+                if is_playing_event.is_set() or not audio_queue.empty() or is_speech_active:
+                    last_user_activity = now
+                    continue
+
+                idle_seconds = now - last_user_activity
+                if not silence_prompt_active:
+                    if idle_seconds >= 7.0:
+                        print(f"⏱️ [vobiz-ws] Inactivity timeout: 7s silence detected. Asking caller: 'Are you still on the line?'")
+                        silence_prompt_active = True
+                        last_user_activity = asyncio.get_running_loop().time()
+                        cur_l = getattr(llm, "current_lang", "gu")
+                        prompt_msg = SILENCE_CHECK_PROMPTS.get(cur_l, SILENCE_CHECK_PROMPTS["gu"])
+                        bcp47_code = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
+                        await send_vobiz_audio(prompt_msg, bcp47_code)
+                else:
+                    if idle_seconds >= 7.0:
+                        print(f"⏱️ [vobiz-ws] Inactivity timeout: No response after 7s prompt. Concluding call and hanging up...")
+                        cur_l = getattr(llm, "current_lang", "gu")
+                        farewell_msg = FAREWELL_PROMPTS.get(cur_l, FAREWELL_PROMPTS["gu"])
+                        bcp47_code = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
+                        await send_vobiz_audio(farewell_msg, bcp47_code)
+                        while not audio_queue.empty() or is_playing_event.is_set():
+                            await asyncio.sleep(0.2)
+                        await asyncio.sleep(0.8)
+                        print(f"📞 [vobiz-ws] Inactivity hangup: Disconnecting stream {stream_id}...")
+                        await websocket.send_text(json.dumps({
+                            "event": "stop",
+                            "streamId": stream_id,
+                        }))
+                        await fire_hangup_url(call_id=call_id, caller_num=caller_num, reason="inactivity_timeout")
+                        break
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[vobiz-ws] Inactivity monitor notice: {e}")
 
     async def vobiz_audio_sender():
         """Drains the audio queue sequentially so sentences never interleave."""
@@ -1129,7 +1398,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     _audio_sender_task = asyncio.create_task(vobiz_audio_sender())
 
     async def process_caller_audio(raw_pcm: bytes):
-        nonlocal active_turn_task, stream_id, call_id
+        nonlocal active_turn_task, stream_id, call_id, caller_num
         if not raw_pcm:
             return
 
@@ -1200,6 +1469,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     "event": "stop",
                     "streamId": stream_id,
                 }))
+                await fire_hangup_url(call_id=call_id, caller_num=caller_num, reason="caller_hangup_requested")
         except asyncio.CancelledError:
             print("🛑 [vobiz-ws] Turn cancelled by caller interruption.")
             raise
@@ -1255,6 +1525,10 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 print(f"🚀 [vobiz-ws] Phone stream started: streamId={stream_id or '(none)'}, callId={call_id}, format={'mu-law 8kHz' if is_mulaw else 'PCM16 16kHz'}")
                 # Greet caller with opening welcome message in Gujarati over the phone
                 await send_vobiz_audio(WELCOME_MESSAGE, "gu-IN")
+                last_user_activity = asyncio.get_running_loop().time()
+                silence_prompt_active = False
+                if inactivity_task is None or inactivity_task.done():
+                    inactivity_task = asyncio.create_task(telephony_inactivity_monitor())
 
             elif event == "media":
                 if not stream_id:
@@ -1304,7 +1578,9 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                             audio_chunks = [pcm_chunk]
                             pre_speech_buffer.clear()
                             is_speech_active = True
+                            silence_prompt_active = False
                             last_speech_time = asyncio.get_running_loop().time()
+                            last_user_activity = last_speech_time
                     else:
                         consecutive_barge = 0
                     continue
@@ -1316,21 +1592,26 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     if consecutive_speech >= 2:
                         if not is_speech_active:
                             is_speech_active = True
+                            silence_prompt_active = False
+                            last_user_activity = asyncio.get_running_loop().time()
                             # Prepend pre-speech buffer so initial consonants (like "H" in "Hello") are not clipped
                             audio_chunks.extend(list(pre_speech_buffer))
                             pre_speech_buffer.clear()
                         audio_chunks.append(pcm_chunk)
                         last_speech_time = asyncio.get_running_loop().time()
+                        last_user_activity = last_speech_time
                     else:
                         pre_speech_buffer.append(pcm_chunk)
                 else:
                     consecutive_speech = 0
                     if is_speech_active:
                         audio_chunks.append(pcm_chunk)
-                        # Check 0.55s silence commit
+                        # Check 0.40s silence commit for ultra-low turn-taking latency
                         now = asyncio.get_running_loop().time()
-                        if now - last_speech_time >= 0.55:
+                        if now - last_speech_time >= 0.40:
                             is_speech_active = False
+                            silence_prompt_active = False
+                            last_user_activity = now
                             total_pcm = b"".join(audio_chunks)
                             audio_chunks = []
                             pre_speech_buffer.clear()
@@ -1352,8 +1633,27 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"⚠️ [vobiz-ws] Telephony stream error: {e}")
     finally:
+        if inactivity_task and not inactivity_task.done():
+            inactivity_task.cancel()
         if call_id:
             db.log_call_end(call_id)
+            try:
+                mongo_store = get_shared_mongo_store()
+                turns_formatted = []
+                for h in llm.history:
+                    turns_formatted.append({
+                        "role": h.get("role", "user"),
+                        "text": h.get("content", ""),
+                    })
+                mongo_store.save_call_transcript(
+                    call_id=call_id,
+                    caller_number=caller_num,
+                    turns=turns_formatted,
+                    language=getattr(llm, "current_lang", "gu"),
+                    status="completed",
+                )
+            except Exception as me:
+                print(f"[vobiz-ws] Mongo transcript save notice: {me}")
             try:
                 from intelligence.post_call import analyze_and_record_call
                 asyncio.create_task(analyze_and_record_call(call_id, llm.history.copy(), db))

@@ -46,6 +46,7 @@ class VoiceAgentApp {
     this.canvasCtx = this.canvas ? this.canvas.getContext("2d") : null;
     this.animationFrameId = null;
 
+    window.__appInstance = this;
     this.initElements();
     this.initEventListeners();
     this.initWebSocket();
@@ -53,6 +54,7 @@ class VoiceAgentApp {
     this.loadDatabaseData();
     this.checkSystemStatus();
     this.loadCallHistory();
+    this.loadRecentTranscripts();
     this.initUxEnhancements();
 
     this.startCanvasAnimation();
@@ -61,7 +63,10 @@ class VoiceAgentApp {
       if (!this.isCallActive) this.checkSystemStatus();
     }, 30000); // 30s when idle (was 10s unconditionally)
     this._historyPollInterval = setInterval(() => {
-      if (!this.isCallActive) this.loadCallHistory();
+      if (!this.isCallActive) {
+        this.loadCallHistory();
+        this.loadRecentTranscripts();
+      }
     }, 20000); // 20s when idle (paused during call)
   }
 
@@ -139,6 +144,17 @@ class VoiceAgentApp {
     this.deleteDocName = document.getElementById("deleteDocName");
     this.pendingDeleteDocId = null;
     this.pendingDeleteDocName = null;
+
+    // Transcripts Elements (MongoDB)
+    this.transcriptsTable = document.getElementById("transcriptsTable");
+    this.transcriptsBody = document.getElementById("transcriptsBody");
+    this.refreshTranscriptsBtn = document.getElementById("refreshTranscriptsBtn");
+    this.transcriptModal = document.getElementById("transcriptModal");
+    this.closeTranscriptModalBtn = document.getElementById("closeTranscriptModalBtn");
+    this.closeTranscriptModalActionBtn = document.getElementById("closeTranscriptModalActionBtn");
+    this.transcriptModalTitle = document.getElementById("transcriptModalTitle");
+    this.transcriptModalMeta = document.getElementById("transcriptModalMeta");
+    this.transcriptModalBody = document.getElementById("transcriptModalBody");
   }
 
   initEventListeners() {
@@ -357,6 +373,22 @@ class VoiceAgentApp {
     this.addStudentForm.addEventListener("submit", (e) =>
       this.handleAddStudentSubmit(e),
     );
+
+    // Transcripts Listeners (MongoDB)
+    if (this.refreshTranscriptsBtn) {
+      this.refreshTranscriptsBtn.addEventListener("click", () => this.loadRecentTranscripts());
+    }
+    if (this.closeTranscriptModalBtn) {
+      this.closeTranscriptModalBtn.addEventListener("click", () => this.closeTranscriptModal());
+    }
+    if (this.closeTranscriptModalActionBtn) {
+      this.closeTranscriptModalActionBtn.addEventListener("click", () => this.closeTranscriptModal());
+    }
+    if (this.transcriptModal) {
+      this.transcriptModal.addEventListener("click", (e) => {
+        if (e.target === this.transcriptModal) this.closeTranscriptModal();
+      });
+    }
   }
 
   initTheme() {
@@ -540,20 +572,27 @@ class VoiceAgentApp {
         this.updateStateText("Ready. Speak your next question whenever ready.");
       }
       this.loadCallHistory();
+      this.loadRecentTranscripts();
     } else if (msg.event === "call_started_ack") {
       this.updateStateText(
         `Call ${msg.call_id || ""} started. Speak naturally — I am listening.`,
       );
     } else if (msg.event === "call_ended_ack") {
       this.updateStateText("Call logged. See Call History for details.");
-      setTimeout(() => this.loadCallHistory(), 1500);
+      setTimeout(() => {
+        this.loadCallHistory();
+        this.loadRecentTranscripts();
+      }, 1500);
     } else if (msg.event === "call_ended") {
       if (this.isCallActive) {
         this.toggleVoiceCall();
       }
       this.finalizeAssistantBubble(null, null, true);
       this.updateStateText("Call disconnected and logged.");
-      setTimeout(() => this.loadCallHistory(), 1500);
+      setTimeout(() => {
+        this.loadCallHistory();
+        this.loadRecentTranscripts();
+      }, 1500);
     } else if (msg.event === "interrupted") {
       this.interruptAgent(false);
       this.finalizeAssistantBubble(null, null, false);
@@ -727,7 +766,7 @@ class VoiceAgentApp {
       if (calls.length === 0) {
         this.callHistoryBody.innerHTML = `
           <tr>
-            <td colspan="6" class="muted">No calls yet. Press Start voice call to begin.</td>
+            <td colspan="7" class="muted">No calls yet. Press Start voice call to begin.</td>
           </tr>
         `;
         return;
@@ -769,12 +808,141 @@ class VoiceAgentApp {
               <span style="font-size:0.85rem; line-height:1.3;">${this.escapeHtml(summary)}</span>
             </td>
             <td class="muted small">${when}</td>
+            <td>
+              <button class="btn btn-sm" style="font-size:0.75rem; padding: 4px 8px;" onclick="window.__appInstance.openTranscriptModal('${this.escapeHtml(c.call_id || "")}')">
+                View Transcript
+              </button>
+            </td>
           </tr>
         `;
         })
         .join("");
     } catch (e) {
       console.error("Call history load error:", e);
+    }
+  }
+
+  async loadRecentTranscripts() {
+    if (!this.transcriptsBody) return;
+    try {
+      const res = await fetch("/api/transcripts/recent?limit=10");
+      const data = await res.json();
+      const transcripts = data.transcripts || [];
+
+      if (transcripts.length === 0) {
+        this.transcriptsBody.innerHTML = `
+          <tr>
+            <td colspan="7" class="muted">No call transcripts recorded in MongoDB yet. Make a call to see live transcripts.</td>
+          </tr>
+        `;
+        return;
+      }
+
+      this.transcriptsBody.innerHTML = transcripts
+        .map((t) => {
+          const cid = t.call_id || "—";
+          const caller = t.caller_number || "Web";
+          const lang = t.language || "gu-IN";
+          const dur = this.formatDuration(t.duration_seconds || 0);
+          const turns = t.turn_count || (t.turns ? t.turns.length : 0);
+          const when = t.created_at ? new Date(t.created_at).toLocaleString() : "—";
+
+          return `
+          <tr>
+            <td><code class="mono">${this.escapeHtml(cid)}</code></td>
+            <td>${this.escapeHtml(caller)}</td>
+            <td><span class="tag" style="font-size:0.75rem;">${this.escapeHtml(lang)}</span></td>
+            <td>${dur}</td>
+            <td><span class="tag" style="font-size:0.75rem;">${turns} turns</span></td>
+            <td class="muted small">${when}</td>
+            <td>
+              <button class="btn btn-sm btn-primary" style="font-size:0.75rem; padding: 4px 10px;" onclick="window.__appInstance.openTranscriptModal('${this.escapeHtml(cid)}')">
+                View Dialogue
+              </button>
+            </td>
+          </tr>
+        `;
+        })
+        .join("");
+    } catch (e) {
+      console.error("Transcripts load error:", e);
+      if (this.transcriptsBody) {
+        this.transcriptsBody.innerHTML = `
+          <tr>
+            <td colspan="7" class="muted" style="color:var(--danger)">Error loading transcripts from server.</td>
+          </tr>
+        `;
+      }
+    }
+  }
+
+  async openTranscriptModal(callId) {
+    if (!this.transcriptModal) return;
+    this.transcriptModal.style.display = "flex";
+    if (this.transcriptModalTitle) {
+      this.transcriptModalTitle.textContent = `Call Transcript · ${callId}`;
+    }
+    if (this.transcriptModalMeta) {
+      this.transcriptModalMeta.textContent = "Loading dialogue from MongoDB...";
+    }
+    if (this.transcriptModalBody) {
+      this.transcriptModalBody.innerHTML = `<div class="muted small" style="text-align:center; padding: 20px;">Fetching dialogue turns...</div>`;
+    }
+
+    try {
+      const res = await fetch(`/api/transcripts/${encodeURIComponent(callId)}`);
+      if (!res.ok) throw new Error("Transcript not found");
+      const data = await res.json();
+      const doc = data.transcript || {};
+      const turns = doc.turns || [];
+
+      if (this.transcriptModalMeta) {
+        const caller = doc.caller_number || "Web";
+        const lang = doc.language || "gu-IN";
+        const dur = this.formatDuration(doc.duration_seconds || 0);
+        this.transcriptModalMeta.textContent = `Caller: ${caller} · Lang: ${lang} · Duration: ${dur} · Source: ${data.source || 'MongoDB'}`;
+      }
+
+      if (turns.length === 0) {
+        this.transcriptModalBody.innerHTML = `
+          <div class="muted small" style="text-align:center; padding: 20px;">No speech turns recorded for this call yet.</div>
+        `;
+        return;
+      }
+
+      this.transcriptModalBody.innerHTML = turns
+        .map((t) => {
+          const isUser = t.role === "user";
+          const speakerName = isUser ? "Caller" : "Priya (DDU IT)";
+          const bubbleBg = isUser ? "var(--bg-card, #1e2430)" : "var(--primary-subtle, rgba(46, 117, 89, 0.15))";
+          const borderClr = isUser ? "var(--border, #2a3344)" : "var(--primary, #2e7559)";
+          const badgeColor = isUser ? "#3b82f6" : "#10b981";
+
+          return `
+          <div style="display:flex; flex-direction:column; align-items:flex-start; margin-bottom: 8px;">
+            <div style="display:flex; align-items:center; gap: 6px; margin-bottom: 3px;">
+              <span style="font-size:0.7rem; font-weight:600; color:${badgeColor}; text-transform:uppercase;">${speakerName}</span>
+            </div>
+            <div style="background:${bubbleBg}; border:1px solid ${borderClr}; border-radius:8px; padding: 8px 12px; font-size:0.88rem; line-height:1.4; max-width:98%; word-break:break-word;">
+              ${this.escapeHtml(t.text || "")}
+            </div>
+          </div>
+        `;
+        })
+        .join("");
+    } catch (e) {
+      console.error("Fetch transcript error:", e);
+      if (this.transcriptModalBody) {
+        this.transcriptModalBody.innerHTML = `
+          <div style="color:var(--danger); text-align:center; padding: 20px;">Could not load transcript for call ${this.escapeHtml(callId)}.</div>
+        `;
+      }
+    }
+  }
+
+  closeTranscriptModal() {
+    if (this.transcriptModal) {
+      this.transcriptModal.style.display = "none";
     }
   }
 

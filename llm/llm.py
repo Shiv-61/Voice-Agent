@@ -116,24 +116,29 @@ def expand_multilingual_query(text: str) -> str:
 
 # Fix #13: Pre-compiled frozensets compiled once at import time for O(1) per-turn intersection
 _GUJ_INDICATORS: frozenset[str] = frozenset({
-    "shu", "ketli", "ketla", "ketlu", "che", "chhe", "maate", "nathi", "aapo",
+    "shu", "ketli", "ketla", "ketlu", "che", "chhe", "maate", "mate", "nathi", "aapo",
     "tame", "tamara", "tamari", "tamaru", "aavde", "janavo", "kem", "vishe",
     "pucho", "aabhar", "namaste", "gujarati", "kai", "kayi", "bhanela", "kaho",
-    "mane", "aapjo", "haji", "maru", "maro", "mari", "mara", "mare", "dikro",
+    "mane", "aapjo", "haji", "haju", "maru", "maro", "mari", "mara", "mare", "dikro",
     "dikra", "dikri", "chokro", "chokra", "chokri", "su", "chho", "chhu",
-    "karvanu", "karvo", "batavo", "aavshe", "karo", "joie", "joiye"
+    "karvanu", "karvo", "batavo", "aavshe", "karo", "joie", "joiye", "barabar",
+    "saras", "bolu", "boljo", "muki", "muko", "karjo", "pan", "ane", "suche", "kahu"
 })
 
 _HIN_INDICATORS: frozenset[str] = frozenset({
-    "kya", "kitna", "kitni", "kitne", "hai", "hain", "batao", "bata", "bataiye",
-    "sakate", "sakthi", "sakthe", "hoga", "hogi", "hoge", "nahi", "kripya",
-    "aapki", "aapka", "aapke", "kaise", "kuch", "baare", "mein", "aur", "chahiye",
+    "kya", "kitna", "kitni", "kitne", "hai", "hain", "ho", "hoon", "hun", "batao", "bata", "bataiye",
+    "sakate", "sakthi", "sakthe", "hoga", "hogi", "hoge", "nahi", "nahin", "na", "kripya",
+    "aapki", "aapka", "aapke", "aap", "tum", "kaise", "kuch", "baare", "mein", "aur", "chahiye",
     "dena", "dijiye", "kaun", "kaha", "kahan", "kab", "hindi", "mujhe", "mera",
     "meri", "mere", "uska", "uski", "uske", "unka", "unki", "unke", "beta", "beti",
-    "naam", "bolo", "boliye", "raha", "rahi", "rahe", "tha", "thi",
+    "naam", "bolo", "boliye", "raha", "rahi", "rahe", "tha", "thi", "thhe",
     "iski", "iska", "iske", "inki", "inka", "inke", "hum", "humara", "humari",
-    "achha", "theek", "shukriya", "dhanyawad", "ki", "ka", "ke", "ko", "se", "toh"
+    "achha", "accha", "theek", "shukriya", "dhanyawad", "dhanyavad", "ki", "ka", "ke", "ko", "se", "toh",
+    "bhai", "yaar", "ji", "kardo", "kar", "de", "rakh", "rakho", "kaat", "kat",
+    "par", "pe", "sirf", "bas", "ab", "abhi", "bhi"
 })
+
+_ALL_INDIC_WORDS: frozenset[str] = _GUJ_INDICATORS | _HIN_INDICATORS
 
 _ENG_INDICATORS: frozenset[str] = frozenset({
     "what", "when", "where", "how", "why", "who", "which", "is", "are", "can",
@@ -174,6 +179,9 @@ class LLM:
         Hierarchy:
           - Gujarati (Primary)
           - Hindi & English (Secondary)
+        Rule: If EVEN ONE word in caller's speech is non-English (Hindi, Hinglish, Gujarati, Gujlish),
+        the agent MUST HOLD the previous language without changing to English.
+        Only switch to English if 100% of the speech consists of English words.
         Returns: (lang_code, bcp47, directive_prefix)
         """
         clean = (text or "").strip()
@@ -209,40 +217,59 @@ class LLM:
             return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી).]:\n"
         if "hindi" in words:
             return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी).]:\n"
-        if "english" in words and not (words & _GUJ_INDICATORS) and not (words & _HIN_INDICATORS):
-            return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
 
         guj_overlap = len(words & _GUJ_INDICATORS)
         hin_overlap = len(words & _HIN_INDICATORS)
         eng_overlap = len(words & _ENG_INDICATORS)
 
-        # Multi-word overlap evaluation
-        if hin_overlap > 0 and hin_overlap >= guj_overlap and hin_overlap >= eng_overlap:
-            return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
-        if guj_overlap > 0 and guj_overlap >= hin_overlap and guj_overlap >= eng_overlap:
-            return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
+        # Check if caller used ANY Hindi, Hinglish, Gujarati, or Gujlish words
+        has_any_indic_word = bool(words & _ALL_INDIC_WORDS)
 
-        # Only switch to English if the user speaks a FULL English line/sentence
-        # (at least 2 English indicators or at least 3 English words with an indicator, not a generic greeting)
-        is_full_english_line = (eng_overlap >= 2) or (eng_overlap >= 1 and len(words) >= 3 and not (words & _GUJ_INDICATORS) and not (words & _HIN_INDICATORS))
-        if is_full_english_line and eng_overlap >= hin_overlap and eng_overlap >= guj_overlap:
+        # STRICT LANGUAGE HOLDING RULE:
+        # If EVEN ONE word in user's speech is other than English (Hindi, Hinglish, Gujarati, Gujlish),
+        # the agent MUST HOLD that previous language without changing to English!
+        fb = (fallback_lang or "gu").lower()
+        if has_any_indic_word:
+            # If predominantly Hindi (e.g. 'fees kitni hai?', 'admission kaise milega'):
+            if hin_overlap >= 2 and hin_overlap > guj_overlap and hin_overlap >= eng_overlap:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
+            # If predominantly Gujarati (e.g. 'fees ketli chhe?', 'admission kem male'):
+            if guj_overlap >= 2 and guj_overlap > hin_overlap and guj_overlap >= eng_overlap:
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
+
+            # Otherwise (mixed sentence with Indic token like 'bhai', 'na', 'chhe', 'kardo', etc.):
+            # HOLD THE PREVIOUS LANGUAGE WITHOUT CHANGING TO ENGLISH!
+            if "hi" in fb:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Hindi/Hinglish token. Hold active language: HINDI (हिंदी लिपि). Every single word must be in Hindi.]:\n"
+            else:
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used non-English token. Hold active language: GUJARATI (ગુજરાતી લિપિ).]:\n"
+
+        # ONLY switch to English if the user speaks a FULL 100% English line with ZERO Indic words
+        is_full_english_line = (
+            not has_any_indic_word
+            and (
+                "english" in words
+                or eng_overlap >= 2
+                or (eng_overlap >= 1 and len(words) >= 3)
+            )
+        )
+        if is_full_english_line:
             return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
 
         # Check acoustic STT language hint for neutral queries (e.g. 'Aarav Patel', 'STU1')
-        if stt_lang and not is_simple_greeting(clean):
+        if stt_lang and not is_simple_greeting(clean) and not has_any_indic_word:
             stt_l = stt_lang.lower()
             if "hi" in stt_l:
-                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
-            elif "en" in stt_l:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi.]:\n"
+            elif "en" in stt_l and "en" in fb:
                 return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
             elif "gu" in stt_l:
-                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી).]:\n"
 
         # Neutral query (e.g. 'STU101' or numbers) -> retain session active language, fallback to Gujarati (Primary)
-        fb = (fallback_lang or "").lower()
         if "hi" in fb:
             return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Continue in active conversation language: HINDI (हिंदी लिपि). Every single word must be in Hindi.]:\n"
-        elif "en" in fb:
+        elif "en" in fb and not has_any_indic_word:
             return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Continue in active conversation language: ENGLISH.]:\n"
         else:
             return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Respond in primary language: GUJARATI (ગુજરાતી લિપિ).]:\n"
@@ -456,9 +483,9 @@ class LLM:
         hold_directive = ""
         if is_hangup:
             farewell_map = {
-                "gu": "તમારા સમય માટે આભાર. તમારો દિવસ શુભ રહે!",
-                "hi": "आपके समय के लिए धन्यवाद। आपका दिन शुभ हो!",
-                "en": "Thank you for your time. Have a great day!",
+                "gu": "તમારો દિવસ શુભ રહે. આભાર!",
+                "hi": "आपका दिन शुभ हो। धन्यवाद!",
+                "en": "Have a great day. Thank you!",
             }
             exact_farewell = farewell_map.get(lang_code, farewell_map["gu"])
             hold_directive = (
@@ -688,6 +715,19 @@ class LLM:
             self.history.append({"role": "user", "content": user_text})
             self.history.append({"role": "assistant", "content": exact_greeting})
             yield exact_greeting
+            return
+
+        # Direct zero-latency response for call hangup intent (e.g. "phone cur kardo", "phone cut kardo", "bye")
+        if is_hangup_intent(user_text):
+            farewell_map = {
+                "gu": "તમારો દિવસ શુભ રહે. આભાર!",
+                "hi": "आपका दिन शुभ हो। धन्यवाद!",
+                "en": "Have a great day. Thank you!",
+            }
+            exact_farewell = farewell_map.get(turn_lang, farewell_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_farewell})
+            yield exact_farewell
             return
 
         needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
@@ -926,6 +966,19 @@ class LLM:
             self.history.append({"role": "user", "content": user_text})
             self.history.append({"role": "assistant", "content": exact_greeting})
             yield exact_greeting
+            return
+
+        # Direct zero-latency response for call hangup intent (e.g. "phone cur kardo", "phone cut kardo", "bye")
+        if is_hangup_intent(user_text):
+            farewell_map = {
+                "gu": "તમારો દિવસ શુભ રહે. આભાર!",
+                "hi": "आपका दिन शुभ हो। धन्यवाद!",
+                "en": "Have a great day. Thank you!",
+            }
+            exact_farewell = farewell_map.get(turn_lang, farewell_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_farewell})
+            yield exact_farewell
             return
 
         needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)

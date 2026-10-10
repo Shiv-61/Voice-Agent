@@ -62,19 +62,24 @@ ABBREVIATIONS = {
 FAST_HANGUP_PATTERNS = [
     # English
     r"\b(bye|goodbye|bye[\s-]bye|good[\s-]bye)\b",
-    r"\b(hang[\s-]?up|disconnect|cut the call|end the call|end call)\b",
+    r"\b(hang[\s-]?up|disconnect|cut the call|end the call|end call|cut the phone|hang up the phone)\b",
     r"\b(that['’]?s all|that is all|nothing else|no more questions)\b",
     r"\b(have a (good|great|nice) day|see you later|talk to you later)\b",
     r"\b(thank you,?\s+bye|thanks,?\s+bye)\b",
     r"\b(thank you for your time)\b",
-    # Hindi
+    # Hindi & Hinglish (including 'phone cut kardo', 'phone cur kardo', etc.)
     r"(अलविदा|बाय|बाय\s*बाय)",
-    r"(फोन\s*रख\s*दो|कॉल\s*कट\s*कर\s*दो|कॉल\s*काट\s*दो)",
+    r"(?:फोन|फ़ोन|फ़ोन|कॉल)\s*(?:कट|काट|रख|cur)\s*(?:कर\s*दो|करो|दो|दीजिए|kardo|karo|kar\s*do|de|do)",
+    r"\b(?:phone|call)\s*(?:cut|cur|kat|kaat|rakh|rakho|end|disconnect)\s*(?:kardo|kar\s*do|karo|do|de|rakho)\b",
+    r"\b(?:phone|call)\s*(?:cut|disconnect|end)\b",
+    r"(फोन\s*रख\s*दो|कॉल\s*कट\s*कर\s*दो|कॉल\s*काट\s*दो|फोन\s*काट\s*दो)",
     r"(बस\s*इतना\s*ही|धन्यवाद[,\s]*बस|और\s*कुछ\s*नहीं|कोई\s*सवाल\s*नहीं)",
-    r"(समय\s*के\s*लिए\s*धन्यवाद|दिन\s*शुभ\s*हो)",
-    # Gujarati
+    r"(समय\s*કે\s*लिए\s*धन्यवाद|दिन\s*शुभ\s*हो)",
+    # Gujarati & Gujlish
     r"(આવજો|બાય|બાય\s*બાય)",
-    r"(ફોન\s*મૂકી\s*દો|કૉલ\s*કટ\s*કરો)",
+    r"(?:ફોન|કૉલ)\s*(?:કટ|મૂકી|કાપી)\s*(?:દો|કરો|કરી\s*દો|આપો)",
+    r"\b(?:phone|call)\s*(?:muki|kaapi|muko)\s*(?:do|de|karo|karjo)\b",
+    r"(ફોન\s*મૂકી\s*દો|કૉલ\s*કટ\s*કરો|ફોન\s*કટ\s*કરો|ફોન\s*કટ\s*કરી\s*દો)",
     r"(બસ\s*આટલું\s*જ|આભાર[,\s]*બસ|કંઈ\s*નથી\s*પૂછવું|કોઈ\s*પ્રશ્ન\s*નથી)",
     r"(સમય\s*માટે\s*આભાર|દિવસ\s*શુભ\s*રહે)",
 ]
@@ -82,25 +87,45 @@ FAST_HANGUP_PATTERNS = [
 COMPILED_HANGUP_REGEX = [re.compile(p, re.IGNORECASE) for p in FAST_HANGUP_PATTERNS]
 
 # Patterns detecting the exact agent closing farewell:
-# "Thank you for your time. Have a great day!" across English, Hindi, and Gujarati
+# "Have a great day. Thank you!" / "તમારો દિવસ શુભ રહે. આભાર!" / "आपका दिन शुभ हो। धन्यवाद!"
 AGENT_FAREWELL_PATTERNS = [
     # English
     r"\bthank\s+you\s+for\s+your\s+time\b",
-    r"\bhave\s+a\s+(great|good|nice|wonderful)\s+day\b",
+    r"\bhave\s+a\s+(?:great|good|nice|wonderful)\s+day\b",
+    r"\bhave\s+a\s+(?:great|good|nice|wonderful)\s+day[.!,\s]*thank\s+you\b",
     # Hindi (Devanagari)
     r"(?:आपके\s*)?समय\s*(?:के\s*लिए|देने\s*के\s*लिए)\s*धन्यवाद",
     r"(?:आपका\s*)?दिन\s*(?:शुभ|अच्छा|मंगलमय)\s*(?:हो|रहे|बने)",
+    r"आपका\s*दिन\s*शुभ\s*हो[।!,.\s]*धन्यवाद",
+    r"धन्यवाद[।!,.\s]*आपका\s*दिन\s*शुभ\s*हो",
     # Gujarati (Gujarati script)
     r"(?:તમારા\s*)?સમય\s*(?:માટે|આપવા\s*બદલ)\s*આભાર",
     r"(?:તમારો\s*)?દિવસ\s*(?:શુભ|સારો)\s*રહે",
+    r"તમારો\s*દિવસ\s*શુભ\s*રહે[।!,.\s]*આભાર",
+    r"આભાર[।!,.\s]*તમારો\s*દિવસ\s*શુભ\s*રહે",
     # Romanized / Transliterated
     r"\baapke\s+samay\s+ke\s+liye\s+dhanyawad\b",
     r"\baapka\s+din\s+shubh\b",
     r"\btamara\s+samay\s+maate\s+aabhar\b",
     r"\btamaro\s+divas\s+shubh\b",
+    r"\bapka\s+din\s+shubh\s+ho\b",
 ]
 
 COMPILED_AGENT_FAREWELL_REGEX = [re.compile(p, re.IGNORECASE) for p in AGENT_FAREWELL_PATTERNS]
+
+# Standard silence check prompts when caller is inactive > 7s
+SILENCE_CHECK_PROMPTS = {
+    "gu": "શું તમે હજુ પણ લાઇન પર છો?",
+    "hi": "क्या आप अभी भी लाइन पर हैं?",
+    "en": "Are you still on the line?",
+}
+
+# Standard closing farewells when hangup requested or inactivity concludes
+FAREWELL_PROMPTS = {
+    "gu": "તમારો દિવસ શુભ રહે. આભાર!",
+    "hi": "आपका दिन शुभ हो। धन्यवाद!",
+    "en": "Have a great day. Thank you!",
+}
 
 
 def split_ready_sentences(buffer: str) -> tuple[list[str], str]:
