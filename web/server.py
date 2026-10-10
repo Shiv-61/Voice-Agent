@@ -83,6 +83,25 @@ def get_shared_stt() -> STT:
     return _shared_stt
 
 
+_CACHED_WELCOME_WAV: bytes | None = None
+_CACHED_WELCOME_MULAW: bytes | None = None
+
+
+async def preheat_welcome_cache():
+    """Pre-synthesizes the compulsory opening welcome message to memory for 0ms call latency."""
+    global _CACHED_WELCOME_WAV, _CACHED_WELCOME_MULAW
+    try:
+        tts_inst = get_shared_tts()
+        wav = await asyncio.to_thread(tts_inst.synthesize, WELCOME_MESSAGE, "gu-IN")
+        if wav:
+            _CACHED_WELCOME_WAV = wav
+            from utils import pcm16_16k_to_mulaw
+            _CACHED_WELCOME_MULAW = pcm16_16k_to_mulaw(wav)
+            print("✨ [telephony] Pre-cached compulsory welcome message audio for 0ms initial call delivery.")
+    except Exception as e:
+        print(f"[telephony] Notice preheating welcome cache: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     print("🚀 Initializing Voice Agent Subsystems...")
@@ -91,6 +110,7 @@ async def startup_event():
     print(f"[stt] Active Provider: {stt_inst.provider.upper()} (Sarvam client: {'ready' if stt_inst.sarvam_client else 'not configured'})")
     print(f"[tts] Active Provider: {'SARVAM' if tts_inst.client else 'Edge-TTS fallback'} (Speaker: {config.TTS_SPEAKER})")
     print(f"[llm] Active Provider: {config.LLM_PROVIDER.upper()} | Model: {config.LLM_MODEL} | Temp: {config.LLM_TEMPERATURE}")
+    asyncio.create_task(preheat_welcome_cache())
     print("✅ All systems ready and listening for calls.")
 
 
@@ -494,12 +514,13 @@ class WebVoiceSession:
         self._turn_buffer: list[dict] = []  # Fix #12: buffer turns, bulk-flush at end
         self.is_processing = False
         self.last_user_activity = 0.0
+        self.agent_speaking_until = 0.0
         self.silence_prompt_active = False
         self.inactivity_task = asyncio.create_task(self._inactivity_watchdog())
         self._hook_llm_tools()
 
     async def _inactivity_watchdog(self):
-        """Monitors 7s silence inactivity in active web call sessions."""
+        """Monitors 7s silence inactivity in active web call sessions strictly after speech completes."""
         try:
             while True:
                 await asyncio.sleep(0.5)
@@ -510,12 +531,16 @@ class WebVoiceSession:
                     self.last_user_activity = now
                     continue
 
+                # The 7s countdown starts strictly AFTER completion of agent speech playback
+                if now < self.agent_speaking_until:
+                    self.last_user_activity = self.agent_speaking_until
+                    continue
+
                 idle = now - self.last_user_activity
                 if not self.silence_prompt_active:
                     if idle >= 7.0:
-                        print("⏱️ [web-ws] 7s silence detected. Asking: 'kya aap abhi bhi line par hai'")
+                        print("⏱️ [web-ws] 7s silence detected after speech completion. Asking: 'kya aap abhi bhi line par hai'")
                         self.silence_prompt_active = True
-                        self.last_user_activity = asyncio.get_running_loop().time()
                         cur_l = getattr(self.llm, "current_lang", "gu")
                         prompt_text = SILENCE_CHECK_PROMPTS.get(cur_l, SILENCE_CHECK_PROMPTS["gu"])
                         bcp47 = self.language_code
@@ -525,7 +550,10 @@ class WebVoiceSession:
                         })
                         audio = await asyncio.to_thread(self.tts.synthesize, prompt_text, bcp47)
                         if audio:
+                            dur = len(audio) / 32000.0
+                            self.agent_speaking_until = asyncio.get_running_loop().time() + dur
                             await self.send_bytes_safe(audio)
+                        self.last_user_activity = self.agent_speaking_until
                         await self.send_json_safe({
                             "event": "agent_done",
                             "full_text": prompt_text,
@@ -579,6 +607,7 @@ class WebVoiceSession:
 
     def cancel_active_pipeline(self):
         """Cancels inflight transcription, LLM, and synthesis worker tasks immediately."""
+        self.agent_speaking_until = asyncio.get_running_loop().time()
         if self.active_task and not self.active_task.done():
             self.active_task.cancel()
         for t in list(self.pending_synth_tasks):
@@ -741,8 +770,9 @@ class WebVoiceSession:
                 try:
                     audio_chunk = await task
                     if audio_chunk:
-                        # Fix #6: removed dead is_first_chunk/last_filler_time guard
-                        # (ENABLE_ACOUSTIC_FILLER is False so filler is never sent)
+                        dur = len(audio_chunk) / 32000.0
+                        now = asyncio.get_running_loop().time()
+                        self.agent_speaking_until = max(self.agent_speaking_until, now) + dur
                         await self.send_bytes_safe(audio_chunk)
                 except Exception as err:
                     print(f"[web-ws] Pipelined TTS streaming error: {err}")
@@ -780,7 +810,7 @@ class WebVoiceSession:
             raise
         finally:
             self.is_processing = False
-            self.last_user_activity = asyncio.get_running_loop().time()
+            self.last_user_activity = max(asyncio.get_running_loop().time(), self.agent_speaking_until)
 
     async def process_audio_payload(self, audio_bytes: bytes):
         """Transcribes input audio bytes and runs pipeline."""
@@ -1265,29 +1295,30 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     is_playing_event = asyncio.Event()  # set = currently playing audio
     is_mulaw = True  # Dynamically updated on 'start' event; default is standard telephony mu-law
     last_user_activity = 0.0
+    agent_speaking_until = 0.0
+    is_compulsory_intro = False
     silence_prompt_active = False
     inactivity_task = None
 
     async def telephony_inactivity_monitor():
-        """Monitors 7s silence inactivity during live telephone calls."""
-        nonlocal silence_prompt_active, last_user_activity, stream_id, call_id, caller_num
+        """Monitors 7s silence inactivity during live telephone calls strictly after agent speech completes."""
+        nonlocal silence_prompt_active, last_user_activity, stream_id, call_id, caller_num, agent_speaking_until
         try:
             while True:
                 await asyncio.sleep(0.5)
                 now = asyncio.get_running_loop().time()
                 if last_user_activity == 0.0:
                     continue
-                # If audio is playing to caller, audio is queued, or caller is speaking:
-                if is_playing_event.is_set() or not audio_queue.empty() or is_speech_active:
-                    last_user_activity = now
+                # Inactivity timer MUST start counting ONLY after the completion of the agent's speech playback!
+                if now < agent_speaking_until or is_playing_event.is_set() or not audio_queue.empty() or is_speech_active:
+                    last_user_activity = max(now, agent_speaking_until)
                     continue
 
                 idle_seconds = now - last_user_activity
                 if not silence_prompt_active:
                     if idle_seconds >= 7.0:
-                        print(f"⏱️ [vobiz-ws] Inactivity timeout: 7s silence detected. Asking caller: 'Are you still on the line?'")
+                        print(f"⏱️ [vobiz-ws] Inactivity timeout: 7s silence detected after agent speech completed. Asking caller: 'Are you still on the line?'")
                         silence_prompt_active = True
-                        last_user_activity = asyncio.get_running_loop().time()
                         cur_l = getattr(llm, "current_lang", "gu")
                         prompt_msg = SILENCE_CHECK_PROMPTS.get(cur_l, SILENCE_CHECK_PROMPTS["gu"])
                         bcp47_code = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
@@ -1299,7 +1330,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                         farewell_msg = FAREWELL_PROMPTS.get(cur_l, FAREWELL_PROMPTS["gu"])
                         bcp47_code = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
                         await send_vobiz_audio(farewell_msg, bcp47_code)
-                        while not audio_queue.empty() or is_playing_event.is_set():
+                        while not audio_queue.empty() or asyncio.get_running_loop().time() < agent_speaking_until:
                             await asyncio.sleep(0.2)
                         await asyncio.sleep(0.8)
                         print(f"📞 [vobiz-ws] Inactivity hangup: Disconnecting stream {stream_id}...")
@@ -1316,6 +1347,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
     async def vobiz_audio_sender():
         """Drains the audio queue sequentially so sentences never interleave."""
+        nonlocal agent_speaking_until
         while True:
             item = await audio_queue.get()
             if item is None:  # sentinel
@@ -1325,10 +1357,17 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 continue
             is_playing_event.set()
             try:
-                print(f"🔊 [vobiz-ws] Synthesizing speech ({lang}): '{text.strip()[:60]}...'")
-                wav_bytes = await asyncio.to_thread(tts.synthesize, text.strip(), lang)
+                # Fast pre-cached audio delivery for the compulsory welcome message
+                wav_bytes = None
+                if text.strip() == WELCOME_MESSAGE.strip() and _CACHED_WELCOME_WAV:
+                    wav_bytes = _CACHED_WELCOME_WAV
+                else:
+                    print(f"🔊 [vobiz-ws] Synthesizing speech ({lang}): '{text.strip()[:60]}...'")
+                    wav_bytes = await asyncio.to_thread(tts.synthesize, text.strip(), lang)
+
                 if not wav_bytes:
                     print(f"⚠️ [vobiz-ws] Empty audio synthesized for: '{text.strip()[:40]}'")
+                    is_playing_event.clear()
                     continue
                 try:
                     with io.BytesIO(wav_bytes) as bio, wave.open(bio, "rb") as wf:
@@ -1343,11 +1382,15 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     pcm_bytes = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
 
                 if is_mulaw:
-                    from utils import pcm16_16k_to_mulaw
-                    out_bytes = pcm16_16k_to_mulaw(wav_bytes)
+                    if text.strip() == WELCOME_MESSAGE.strip() and _CACHED_WELCOME_MULAW:
+                        out_bytes = _CACHED_WELCOME_MULAW
+                    else:
+                        from utils import pcm16_16k_to_mulaw
+                        out_bytes = pcm16_16k_to_mulaw(wav_bytes)
                     out_content_type = "audio/x-mulaw"
                     out_sample_rate = 8000
                     chunk_size = 160  # 20ms at 8kHz mono mu-law (Vobiz standard)
+                    speech_duration = len(out_bytes) / 8000.0
                 else:
                     import audioop
                     if in_sr != 16000:
@@ -1357,6 +1400,13 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     out_content_type = "audio/x-l16"
                     out_sample_rate = 16000
                     chunk_size = 320  # 20ms at 16kHz linear PCM
+                    speech_duration = len(out_bytes) / 32000.0
+
+                now = asyncio.get_running_loop().time()
+                # Audio playback duration appends to any ongoing playback on caller's phone
+                start_playback = max(agent_speaking_until, now)
+                agent_speaking_until = start_playback + speech_duration
+                is_playing_event.set()
 
                 # Send audio in 20ms chunks matching Vobiz Voice API specification
                 num_chunks = 0
@@ -1384,10 +1434,9 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 if stream_id:
                     checkpoint_msg["streamId"] = stream_id
                 await websocket.send_text(json.dumps(checkpoint_msg))
-                print(f"🔊 [vobiz-ws] Streamed {num_chunks} audio frames ({len(out_bytes)} bytes {out_content_type}) to caller: '{text.strip()[:50]}...'")
+                print(f"🔊 [vobiz-ws] Streamed {num_chunks} audio frames ({speech_duration:.2f}s audio) to caller: '{text.strip()[:50]}...'")
             except Exception as err:
                 print(f"[vobiz-ws] Error sending playAudio: {err}")
-            finally:
                 is_playing_event.clear()
 
     async def send_vobiz_audio(text: str, lang: str):
@@ -1459,11 +1508,10 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
             if should_hangup:
                 farewell_origin = "agent farewell: 'Thank you for your time. Have a great day!'" if is_agent_farewell(full_agent_reply) else "caller hangup intent"
-                print(f"📞 [vobiz-ws] Hangup condition met ({farewell_origin}). Waiting for farewell audio playback to finish...")
-                # Wait for sequential audio queue to empty and currently playing chunk to finish
-                while not audio_queue.empty() or is_playing_event.is_set():
+                # Wait for sequential audio queue to empty and currently playing chunk to finish on caller's phone
+                while not audio_queue.empty() or asyncio.get_running_loop().time() < agent_speaking_until:
                     await asyncio.sleep(0.2)
-                await asyncio.sleep(1.0)  # Telephone network buffer
+                await asyncio.sleep(0.8)  # Telephone network buffer
                 print(f"📞 [vobiz-ws] Farewell delivered to caller. Disconnecting call stream {stream_id}...")
                 await websocket.send_text(json.dumps({
                     "event": "stop",
@@ -1523,10 +1571,11 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     is_mulaw = True
                 db.log_call_start(call_id, caller_number=caller_num, language="gu-IN")
                 print(f"🚀 [vobiz-ws] Phone stream started: streamId={stream_id or '(none)'}, callId={call_id}, format={'mu-law 8kHz' if is_mulaw else 'PCM16 16kHz'}")
-                # Greet caller with opening welcome message in Gujarati over the phone
+                # Greet caller with compulsory opening welcome message in Gujarati over the phone
+                is_compulsory_intro = True
+                silence_prompt_active = False
                 await send_vobiz_audio(WELCOME_MESSAGE, "gu-IN")
                 last_user_activity = asyncio.get_running_loop().time()
-                silence_prompt_active = False
                 if inactivity_task is None or inactivity_task.done():
                     inactivity_task = asyncio.create_task(telephony_inactivity_monitor())
 
@@ -1556,15 +1605,29 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
                 rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
 
-                # Barge-in: if caller interrupts while agent is speaking, clear audio
-                if is_playing_event.is_set():  # Fix #20: use asyncio.Event
+                now = asyncio.get_running_loop().time()
+                is_agent_speaking = (now < agent_speaking_until) or is_playing_event.is_set() or not audio_queue.empty()
+
+                if not is_agent_speaking and is_playing_event.is_set():
+                    is_playing_event.clear()
+
+                # Compulsory initial intro: ignore line noise so welcome greeting is fully delivered
+                if is_compulsory_intro:
+                    if now < agent_speaking_until or not audio_queue.empty():
+                        continue
+                    else:
+                        is_compulsory_intro = False
+
+                # Barge-in: if caller interrupts while agent is speaking on subsequent turns, clear audio
+                if is_agent_speaking:
                     if rms > 0.045:
                         consecutive_barge += 1
                         if consecutive_barge >= 2:
                             print("🛑 [vobiz-ws] Barge-in confirmed from caller. Clearing playback queue.")
                             if active_turn_task and not active_turn_task.done():
                                 active_turn_task.cancel()
-                            is_playing_event.clear()   # Fix #20: clear event instead of setting bool
+                            agent_speaking_until = now
+                            is_playing_event.clear()
                             # Drain the audio queue to discard pending sentences
                             while not audio_queue.empty():
                                 try:
@@ -1579,8 +1642,8 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                             pre_speech_buffer.clear()
                             is_speech_active = True
                             silence_prompt_active = False
-                            last_speech_time = asyncio.get_running_loop().time()
-                            last_user_activity = last_speech_time
+                            last_speech_time = now
+                            last_user_activity = now
                     else:
                         consecutive_barge = 0
                     continue
@@ -1622,6 +1685,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                         pre_speech_buffer.append(pcm_chunk)
 
             elif event in ("playedStream", "clearedAudio"):
+                agent_speaking_until = asyncio.get_running_loop().time()
                 is_playing_event.clear()
 
             elif event == "stop":

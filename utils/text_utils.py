@@ -127,6 +127,66 @@ FAREWELL_PROMPTS = {
     "en": "Have a great day. Thank you!",
 }
 
+# Exact calm boundary phrases when caller uses abusive language
+ABUSIVE_CALM_PROMPTS = {
+    "gu": "કૃપા કરીને શાંતિથી વાત કરો.",
+    "hi": "कृपया शांति से बात करें।",
+    "en": "Please speak calmly and respectfully.",
+}
+
+# Exact identity introduction when caller explicitly asks who Priya is
+WHO_ARE_YOU_PROMPTS = {
+    "gu": "હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા વાત કરું છું. હું તમારી શું મદદ કરી શકું?",
+    "hi": "मैं डीडीयू आईटी डिपार्टमेंट से प्रिया बात कर रही हूँ। मैं आपकी क्या मदद कर सकती हूँ?",
+    "en": "I am Priya from DDU IT department. How can I assist you today?",
+}
+
+# Fast-path patterns detecting abusive / profane / disrespectful language
+ABUSIVE_LANGUAGE_PATTERNS = [
+    # English vulgarities / insults
+    r"\b(fuck|fucking|fucker|fck|motherfucker|mf)\b",
+    r"\b(bitch|bastard|asshole|dick|dickhead|pussy|cunt)\b",
+    r"\b(shit|bullshit|bloody\s+fool|idiot|stupid|shut\s*up)\b",
+    r"\b(get\s+lost|go\s+to\s+hell|rubbish)\b",
+    # Hindi / Hinglish abusive words & insults
+    r"\b(madarchod|madarchodh|mc|bhenchod|behenchod|bc)\b",
+    r"\b(bhosdike|bhosadike|bhosdi\s*ke|chutiya|chutiye|chutye)\b",
+    r"\b(harami|kamina|kamine|kameene|gandu|gaandu|randi|kutti|kutiya)\b",
+    r"\b(saale|saala|suar|kutte|kutta|tatti)\b",
+    r"\b(bakwas\s+band\s+kar|bakwaas\s+band\s+kar|chup\s+kar|chup\s+baith|aukat\s+mein\s+reh)\b",
+    r"(मादरचोद|बहनचोद|भोसड़ीके|भोसडीके|चूतिया|चूतिये|हरामी|कमीने|कमीना|गांडू|रंडी|कुतिया|कुत्ते|साले|साला|सुअर)",
+    r"(बकवास\s*बंद\s*कर|चुप\s*कर|चुप\s*रह|औकात\s*में\s*रह)",
+    # Gujarati / Gujlish abusive words & insults
+    r"\b(bhosdina|bhosadina|chodi\s*na|lodha|loda|gadheda|kutro)\b",
+    r"\b(bakwas\s+bandh\s+kar|chup\s+tha|chup\s+bes)\b",
+    r"(ગાંડો|ગધેડો|હરામી|કમીના|સાલા|ભોસડીના|ચોદિયા|કૂતરો|લફોંગો)",
+    r"(બકવાસ\s*બંધ\s*કર|ચૂપ\s*થા|ચૂપ\s*બેસ|મોં\s*બંધ\s*રાખ)",
+]
+COMPILED_ABUSIVE_REGEX = [re.compile(p, re.IGNORECASE) for p in ABUSIVE_LANGUAGE_PATTERNS]
+
+# Fast-path patterns detecting caller explicitly asking who the assistant is
+WHO_ARE_YOU_PATTERNS = [
+    # English
+    r"\bwho\s+(?:are\s+you|is\s+this|am\s+i\s+speaking\s+to|is\s+speaking)\b",
+    r"\bwhat\s+is\s+your\s+name\b",
+    r"\b(?:tell\s+me\s+)?your\s+name\b",
+    # Hindi
+    r"(?:आप|तुम)\s*कौन\s*(?:हो|हैं|है)",
+    r"कौन\s*बोल\s*रहा\s*(?:है|हो)",
+    r"आपका\s*नाम\s*क्या\s*है",
+    r"\b(?:aap|tum)\s*kaun\s*(?:ho|hain|hai)\b",
+    r"\bkaun\s*bol\s*(?:raha|rahi)\s*(?:hai|ho)\b",
+    r"\baapka\s*naam\s*kya\s*hai\b",
+    # Gujarati
+    r"તમે\s*કોણ\s*છો",
+    r"કોણ\s*(?:બોલો\s*છો|વાત\s*કરે\s*છે|બોલે\s*છે)",
+    r"તમારું\s*નામ\s*શું\s*છે",
+    r"\btame\s*kon\s*chho\b",
+    r"\bkon\s*(?:bolo\s*cho|vaat\s*kare\s*che)\b",
+    r"\btamaru\s*naam\s*shu\s*che\b",
+]
+COMPILED_WHO_ARE_YOU_REGEX = [re.compile(p, re.IGNORECASE) for p in WHO_ARE_YOU_PATTERNS]
+
 
 def split_ready_sentences(buffer: str) -> tuple[list[str], str]:
     """
@@ -203,6 +263,38 @@ def is_agent_farewell(agent_text: str) -> bool:
     return False
 
 
+def is_abusive_intent(user_text: str) -> bool:
+    """
+    Fast sub-millisecond evaluation of whether caller uses abusive, offensive,
+    or disrespectful language in English, Hindi, Gujarati, Hinglish, or Gujlish.
+    """
+    if not user_text:
+        return False
+
+    clean_text = user_text.strip().lower()
+    for regex in COMPILED_ABUSIVE_REGEX:
+        if regex.search(clean_text):
+            return True
+
+    return False
+
+
+def is_who_are_you_intent(user_text: str) -> bool:
+    """
+    Fast sub-millisecond evaluation of whether caller explicitly asks who the assistant is
+    (e.g., 'who are you', 'tame kon chho', 'aap kaun hain', 'what is your name').
+    """
+    if not user_text:
+        return False
+
+    clean_text = user_text.strip().lower()
+    for regex in COMPILED_WHO_ARE_YOU_REGEX:
+        if regex.search(clean_text):
+            return True
+
+    return False
+
+
 def clean_speech_text(text: str) -> str:
     """
     Strips markdown formatting, bold/italics markers, hashes, URLs, and code blocks
@@ -235,6 +327,19 @@ def clean_speech_text(text: str) -> str:
     )
     cleaned = re.sub(
         r"^(?:(?:जी|हाँ|हां),?\s*)?(?:मैं अभी (?:चेक करके बताती हूँ|देखती हूँ|जाँच करती हूँ)|पता करके बताती हूँ)[.,!।]*\s*",
+        "", cleaned, flags=re.IGNORECASE
+    )
+    # Strip accidental self-introduction repetition in spoken responses
+    cleaned = re.sub(
+        r"^(?:(?:hello|hi|hey),?\s*)?(?:i am priya(?: from ddu it department)?|my name is priya)[.,!]*\s*",
+        "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"^(?:(?:નમસ્તે|હેલો|હાય),?\s*)?(?:હું (?:ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી )?પ્રિયા (?:વાત કરું છું|બોલું છું|છું))[.,!|।]*\s*",
+        "", cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"^(?:(?:नमस्ते|हेलो|हाय),?\s*)?(?:मैं (?:डीडीयू आईटी डिपार्टमेंट से )?प्रिया (?:बात कर रही हूँ|बोल रही हूँ|हूँ))[.,!|।]*\s*",
         "", cleaned, flags=re.IGNORECASE
     )
     # Normalize excessive whitespace

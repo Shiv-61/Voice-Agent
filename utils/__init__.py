@@ -17,6 +17,10 @@ from .text_utils import (
     query_needs_db_or_rag,
     SILENCE_CHECK_PROMPTS,
     FAREWELL_PROMPTS,
+    ABUSIVE_CALM_PROMPTS,
+    WHO_ARE_YOU_PROMPTS,
+    is_abusive_intent,
+    is_who_are_you_intent,
 )
 from .audio_utils import mulaw_to_pcm16_16k, pcm16_16k_to_mulaw
 
@@ -25,6 +29,8 @@ __all__ = [
     "is_hangup_intent",
     "is_agent_farewell",
     "is_simple_greeting",
+    "is_abusive_intent",
+    "is_who_are_you_intent",
     "clean_speech_text",
     "is_prompt_leak",
     "is_noise_hallucination",
@@ -36,6 +42,8 @@ __all__ = [
     "query_needs_db_or_rag",
     "SILENCE_CHECK_PROMPTS",
     "FAREWELL_PROMPTS",
+    "ABUSIVE_CALM_PROMPTS",
+    "WHO_ARE_YOU_PROMPTS",
     "mulaw_to_pcm16_16k",
     "pcm16_16k_to_mulaw",
 ]

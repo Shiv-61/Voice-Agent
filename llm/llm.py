@@ -17,12 +17,16 @@ from utils import (
     is_hangup_intent,
     is_agent_farewell,
     is_simple_greeting,
+    is_abusive_intent,
+    is_who_are_you_intent,
     clean_speech_text,
     is_prompt_leak,
     HOLD_PHRASES,
     HOLD_PHRASE_REGEX,
     query_needs_db_or_rag,
     get_error_message,
+    ABUSIVE_CALM_PROMPTS,
+    WHO_ARE_YOU_PROMPTS,
 )
 from config.prompt_loader import (
     get_welcome_message,
@@ -199,6 +203,28 @@ class LLM:
                 return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
             else:
                 return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Respond in primary language: GUJARATI (ગુજરાતી લિપિ).]:\n"
+
+        # 0b. Abusive language fast-path language detection
+        if is_abusive_intent(clean):
+            if re.search(r"[\u0900-\u097f]", clean):
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Hindi. Respond in HINDI.]:\n"
+            if re.search(r"[\u0a80-\u0aff]", clean):
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Gujarati. Respond in GUJARATI.]:\n"
+            if any(re.search(p, lower) for p in [r"\b(bhosdina|bhosadina|chodi\s*na|lodha|loda|gadheda|kutro|bakwas\s+bandh|chup\s+tha|chup\s+bes)\b"]):
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Gujarati. Respond in GUJARATI.]:\n"
+            if any(re.search(p, lower) for p in [r"\b(madarchod|bhenchod|behenchod|bhosdike|bhosadike|chutiya|chutiye|harami|kamina|kamine|kameene|gandu|randi|kutti|kutiya|saale|saala|suar|kutte|kutta|bakwas\s+band\s+kar|chup\s+kar|chup\s+baith|aukat)\b"]):
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Hindi. Respond in HINDI.]:\n"
+            if any(re.search(p, lower) for p in [r"\b(fuck|fucking|fucker|fck|motherfucker|bitch|bastard|asshole|dick|pussy|cunt|shit|bullshit|bloody|idiot|stupid|shut\s*up|get\s+lost|go\s+to\s+hell)\b"]):
+                return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used English. Respond in ENGLISH.]:\n"
+
+        # 0c. Identity inquiry fast-path language detection ("who are you")
+        if is_who_are_you_intent(clean):
+            if re.search(r"[\u0900-\u097f]", clean) or any(re.search(p, lower) for p in [r"\b(aap|tum|kaun|hain|naam|kya)\b"]):
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. Respond in HINDI.]:\n"
+            if re.search(r"[\u0a80-\u0aff]", clean) or any(re.search(p, lower) for p in [r"\b(tame|tamaru|kon|chho|chhu|shu|che|chhe)\b"]):
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI. Respond in GUJARATI.]:\n"
+            if any(re.search(p, lower) for p in [r"\b(who|are|you|is|this|name)\b"]):
+                return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. Respond in ENGLISH.]:\n"
 
         # 1. Native script detection (100% definitive)
         if re.search(r"[\u0900-\u097f]", clean):
@@ -704,12 +730,31 @@ class LLM:
         messages = self._prepare_messages(user_text, stt_lang=stt_lang)
         turn_lang = self.current_lang
 
-        # Direct response for phone greetings (e.g. 'hello', 'hi', 'kem cho')
+        # Direct zero-latency response for abusive language ("Kripya shanti se baat kare")
+        if is_abusive_intent(user_text):
+            abusive_map = ABUSIVE_CALM_PROMPTS
+            exact_calm = abusive_map.get(turn_lang, abusive_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_calm})
+            yield exact_calm
+            return
+
+        # Direct zero-latency response when caller explicitly asks "who are you"
+        if is_who_are_you_intent(user_text):
+            identity_map = WHO_ARE_YOU_PROMPTS
+            exact_identity = identity_map.get(turn_lang, identity_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_identity})
+            yield exact_identity
+            return
+
+        # Direct response for phone greetings during ongoing call (e.g. 'hello', 'hi', 'kem cho')
+        # Since welcome message already introduced Priya at call start, do NOT repeat the self-intro!
         if getattr(self, "_last_turn_was_greeting", False):
             greeting_map = {
-                "gu": "નમસ્તે! હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા બોલું છું. હું તમારી શું મદદ કરી શકું?",
-                "hi": "नमस्ते! मैं डीडीयू आईटी डिपार्टमेंट से प्रिया बोल रही हूँ। मैं आपकी क्या मदद कर सकती हूँ?",
-                "en": "Hello! I am Priya from DDU IT department. How can I help you today?",
+                "gu": "નમસ્તે! કહો, હું તમારી શું મદદ કરી શકું?",
+                "hi": "नमस्ते! बताइए, मैं आपकी क्या मदद कर सकती हूँ?",
+                "en": "Hello! How can I assist you today?",
             }
             exact_greeting = greeting_map.get(turn_lang, greeting_map["gu"])
             self.history.append({"role": "user", "content": user_text})
@@ -918,11 +963,11 @@ class LLM:
                                     clean_text = "DDU IT has a 96.5% placement rate, with the highest package at 45 lakh rupees and an average of 12.5 lakh rupees."
                             else:
                                 if turn_lang == "gu":
-                                    clean_text = "નમસ્તે, હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા છું. હું તમને એડમિશન, અભ્યાસક્રમ અથવા વિદ્યાર્થી રેકોર્ડ્સ વિશે શું માહિતી આપું?"
+                                    clean_text = "હું તમને એડમિશન, અભ્યાસક્રમ અથવા વિદ્યાર્થી રેકોર્ડ્સ વિશે શું માહિતી આપું?"
                                 elif turn_lang == "hi":
-                                    clean_text = "नमस्ते, मैं डीडीयू आईटी विभाग से प्रिया हूँ। मैं आपको प्रवेश, पाठ्यक्रम या छात्र रिकॉर्ड के बारे में क्या जानकारी दे सकती हूँ?"
+                                    clean_text = "मैं आपको प्रवेश, पाठ्यक्रम या छात्र रिकॉर्ड के बारे में क्या जानकारी दे सकती हूँ?"
                                 else:
-                                    clean_text = "Hello, I am Priya from DDU IT department. How may I assist you with admissions, curriculum, or student records?"
+                                    clean_text = "How may I assist you with admissions, curriculum, or student records?"
                             yield clean_text
 
                         clean_history_text = clean_text
@@ -955,12 +1000,31 @@ class LLM:
         messages = self._prepare_messages(user_text, stt_lang=stt_lang)
         turn_lang = self.current_lang
 
-        # Direct response for phone greetings (e.g. 'hello', 'hi', 'kem cho')
+        # Direct zero-latency response for abusive language ("Kripya shanti se baat kare")
+        if is_abusive_intent(user_text):
+            abusive_map = ABUSIVE_CALM_PROMPTS
+            exact_calm = abusive_map.get(turn_lang, abusive_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_calm})
+            yield exact_calm
+            return
+
+        # Direct zero-latency response when caller explicitly asks "who are you"
+        if is_who_are_you_intent(user_text):
+            identity_map = WHO_ARE_YOU_PROMPTS
+            exact_identity = identity_map.get(turn_lang, identity_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_identity})
+            yield exact_identity
+            return
+
+        # Direct response for phone greetings during ongoing call (e.g. 'hello', 'hi', 'kem cho')
+        # Since welcome message already introduced Priya at call start, do NOT repeat the self-intro!
         if getattr(self, "_last_turn_was_greeting", False):
             greeting_map = {
-                "gu": "નમસ્તે! હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા બોલું છું. હું તમારી શું મદદ કરી શકું?",
-                "hi": "नमस्ते! मैं डीडीयू आईटी डिपार्टमेंट से प्रिया बोल रही हूँ। मैं आपकी क्या मदद कर सकती हूँ?",
-                "en": "Hello! I am Priya from DDU IT department. How can I help you today?",
+                "gu": "નમસ્તે! કહો, હું તમારી શું મદદ કરી શકું?",
+                "hi": "नमस्ते! बताइए, मैं आपकी क्या मदद कर सकती हूँ?",
+                "en": "Hello! How can I assist you today?",
             }
             exact_greeting = greeting_map.get(turn_lang, greeting_map["gu"])
             self.history.append({"role": "user", "content": user_text})
@@ -1169,11 +1233,11 @@ class LLM:
                                     clean_text = "DDU IT has a 96.5% placement rate, with the highest package at 45 lakh rupees and an average of 12.5 lakh rupees."
                             else:
                                 if turn_lang == "gu":
-                                    clean_text = "નમસ્તે, હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા છું. હું તમને એડમિશન, અભ્યાસક્રમ અથવા વિદ્યાર્થી રેકોર્ડ્સ વિશે શું માહિતી આપું?"
+                                    clean_text = "હું તમને એડમિશન, અભ્યાસક્રમ અથવા વિદ્યાર્થી રેકોર્ડ્સ વિશે શું માહિતી આપું?"
                                 elif turn_lang == "hi":
-                                    clean_text = "नमस्ते, मैं डीडीयू आईटी विभाग से प्रिया हूँ। मैं आपको प्रवेश, पाठ्यक्रम या छात्र रिकॉर्ड के बारे में क्या जानकारी दे सकती हूँ?"
+                                    clean_text = "मैं आपको प्रवेश, पाठ्यक्रम या छात्र रिकॉर्ड के बारे में क्या जानकारी दे सकती हूँ?"
                                 else:
-                                    clean_text = "Hello, I am Priya from DDU IT department. How may I assist you with admissions, curriculum, or student records?"
+                                    clean_text = "How may I assist you with admissions, curriculum, or student records?"
                             yield clean_text
 
                         clean_history_text = clean_text
