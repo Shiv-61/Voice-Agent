@@ -8,7 +8,7 @@
       content="UniVoice Campus Desk — admissions, student records and campus help by voice or text in English, Hindi and Gujarati."
     />
     <title>UniVoice Campus Desk</title>
-    <link rel="stylesheet" href="/static/style.css?v=4.0" />
+    <link rel="stylesheet" href="/static/style.css?v=5.0" />
   </head>
   <body>
     <a class="skip-link" href="#app-main">Skip to main content</a>
@@ -258,8 +258,11 @@
             <div class="card history-card">
               <div class="card-head">
                 <div>
-                  <h2 class="h2">Call History</h2>
-                  <p class="muted">Most recent calls first.</p>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <h2 class="h2" style="margin: 0;">Call History</h2>
+                    <span class="badge" id="callHistoryBadge" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px;">Recent 10 Calls</span>
+                  </div>
+                  <p class="muted" style="margin-top: 2px; font-size: 0.82rem;">Calls with attached dialogue transcripts from MongoDB.</p>
                 </div>
                 <button
                   id="refreshCallsBtn"
@@ -269,70 +272,29 @@
                   Refresh
                 </button>
               </div>
-              <div class="table-wrap">
-                <table class="table" id="callHistoryTable">
+              <div class="table-wrap history-table-wrap">
+                <table class="table history-table" id="callHistoryTable">
                   <thead>
                     <tr>
-                      <th scope="col">Call ID</th>
-                      <th scope="col">Caller</th>
-                      <th scope="col">Duration</th>
-                      <th scope="col">College Intent & Lead</th>
-                      <th scope="col">Executive Summary</th>
-                      <th scope="col">Time</th>
-                      <th scope="col">Transcript</th>
+                      <th style="width: 32%;">Caller & Call ID</th>
+                      <th style="width: 20%;">Duration & Lang</th>
+                      <th style="width: 28%;">Inquiry Summary</th>
+                      <th style="width: 20%; text-align: right;">Transcript</th>
                     </tr>
                   </thead>
                   <tbody id="callHistoryBody">
                     <tr>
-                      <td colspan="7" class="muted">
-                        No calls yet. Press Start voice call to begin.
+                      <td colspan="4" class="muted" style="text-align: center; padding: 24px;">
+                        Loading recent calls from MongoDB...
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <p class="hint">
-                Each voice call is logged automatically with its questions and full transcript.
+              <p class="hint" style="margin-top: 10px; font-size: 0.78rem; display: flex; justify-content: space-between; align-items: center;">
+                <span>Click any row or "View Transcript" to open full conversation dialogue.</span>
+                <span class="muted" id="transcriptSyncStatus">🍃 MongoDB Atlas</span>
               </p>
-            </div>
-
-            <!-- Recent Call Transcripts (MongoDB) -->
-            <div class="card" style="margin-top: 24px;">
-              <div class="card-head">
-                <div>
-                  <h2 class="h2">Recent Call Transcripts (MongoDB)</h2>
-                  <p class="muted">Latest 10 voice call dialogues fetched directly from MongoDB Atlas.</p>
-                </div>
-                <button
-                  id="refreshTranscriptsBtn"
-                  class="icon-btn"
-                  title="Refresh transcripts"
-                >
-                  Refresh
-                </button>
-              </div>
-              <div class="table-wrap">
-                <table class="table" id="transcriptsTable">
-                  <thead>
-                    <tr>
-                      <th scope="col">Call ID</th>
-                      <th scope="col">Caller</th>
-                      <th scope="col">Language</th>
-                      <th scope="col">Duration</th>
-                      <th scope="col">Turns</th>
-                      <th scope="col">Time</th>
-                      <th scope="col">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody id="transcriptsBody">
-                    <tr>
-                      <td colspan="7" class="muted">
-                        Loading recent transcripts from MongoDB...
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
             </div>
           </div>
         </section>
@@ -932,6 +894,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=4.3"></script>
+    <script src="/static/app.js?v=5.0"></script>
   </body>
 </html>

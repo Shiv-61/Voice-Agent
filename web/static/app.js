@@ -759,14 +759,54 @@ class VoiceAgentApp {
   async loadCallHistory() {
     if (!this.callHistoryBody) return;
     try {
-      const res = await fetch("/api/calls/history?limit=50");
-      const data = await res.json();
-      const calls = data.calls || [];
+      // 1. Fetch recent 10 transcripts from MongoDB (with Postgres fallback)
+      let transcriptsMap = {};
+      let recentTranscripts = [];
+      try {
+        const tRes = await fetch("/api/transcripts/recent?limit=10");
+        if (tRes.ok) {
+          const tData = await tRes.json();
+          recentTranscripts = tData.transcripts || [];
+          recentTranscripts.forEach((t) => {
+            if (t.call_id) transcriptsMap[t.call_id] = t;
+          });
+          const syncStatus = document.getElementById("transcriptSyncStatus");
+          if (syncStatus) {
+            syncStatus.textContent = tData.source === "mongodb" ? "🍃 MongoDB Atlas Synced" : "💾 Synced with Database";
+          }
+        }
+      } catch (te) {
+        console.warn("Transcripts fetch notice:", te);
+      }
+
+      // 2. Fetch call history metrics from backend
+      let calls = [];
+      try {
+        const res = await fetch("/api/calls/history?limit=10");
+        if (res.ok) {
+          const data = await res.json();
+          calls = data.calls || [];
+        }
+      } catch (ce) {
+        console.warn("Calls history fetch notice:", ce);
+      }
+
+      // If calls is empty, fallback to recent transcripts from MongoDB
+      if (calls.length === 0 && recentTranscripts.length > 0) {
+        calls = recentTranscripts;
+      }
+
+      const badge = document.getElementById("callHistoryBadge");
+      if (badge) {
+        badge.textContent = `${calls.length} Recent Calls`;
+      }
 
       if (calls.length === 0) {
         this.callHistoryBody.innerHTML = `
           <tr>
-            <td colspan="7" class="muted">No calls yet. Press Start voice call to begin.</td>
+            <td colspan="4" class="muted" style="text-align: center; padding: 28px;">
+              No calls yet. Press <strong>Start voice call</strong> or make an inbound phone call to begin.
+            </td>
           </tr>
         `;
         return;
@@ -774,43 +814,67 @@ class VoiceAgentApp {
 
       this.callHistoryBody.innerHTML = calls
         .map((c) => {
+          const cid = c.call_id || "";
+          const shortId = cid.length > 10 ? cid.substring(0, 8) + "…" : cid;
+          const caller = c.caller_number || "Web";
+          const ongoing = !c.ended_at && (!c.duration_seconds || c.duration_seconds === 0);
+          const dur = ongoing ? '<span class="tag" style="background:var(--green-bg); color:var(--green-tx);">Live</span>' : this.formatDuration(c.duration_seconds || 0);
+          const when = c.started_at || c.created_at
+            ? new Date(c.started_at || c.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : "—";
+
+          const tDoc = transcriptsMap[cid] || {};
+          const turnsCount = tDoc.turn_count || (tDoc.turns ? tDoc.turns.length : (c.total_turns || 0));
+
+          // Summary or first question extraction
           let queries = [];
           try {
             queries = JSON.parse(c.queries_json || "[]");
           } catch (e) {
-            queries = [];
+            queries = tDoc.turns || [];
           }
-          const first = queries.length ? queries[0].text : "";
-          const extra =
-            queries.length > 1 ? ` (+${queries.length - 1} more)` : "";
-          const purpose = first ? this.escapeHtml(first) + extra : "—";
-          const when = c.started_at
-            ? new Date(c.started_at).toLocaleString()
-            : "—";
-          const ongoing = !c.ended_at;
-          const intent = c.intent || "Admission & General";
-          const lead = c.lead_status || "Prospective Applicant";
-          const summary = c.summary || purpose;
-          const sentimentIcon = c.sentiment === "Positive" ? "😊" : c.sentiment === "Frustrated" ? "⚠️" : "💬";
+          let summary = c.summary || "";
+          if (!summary && Array.isArray(queries) && queries.length > 0) {
+            const firstUser = queries.find((q) => q.role === "user" || q.sender === "user") || queries[0];
+            summary = firstUser.text || firstUser.query_text || "";
+          }
+          if (!summary) summary = c.intent || "General University Inquiry";
+
+          // Language representation
+          const langRaw = c.language || tDoc.language || "gu-IN";
+          const langLabel = langRaw.startsWith("gu") ? "ગુજરાતી" : (langRaw.startsWith("hi") ? "हिंदी" : "EN");
 
           return `
-          <tr>
-            <td><code class="mono">${this.escapeHtml(c.call_id || "")}</code></td>
-            <td>${this.escapeHtml(c.caller_number || "Web")}</td>
-            <td>${ongoing ? '<span class="tag">Ongoing</span>' : this.formatDuration(c.duration_seconds || 0)}</td>
+          <tr onclick="window.__appInstance.openTranscriptModal('${this.escapeHtml(cid)}')">
             <td>
-              <div style="display:flex; flex-direction:column; gap:4px;">
-                <span class="tag" style="font-size:0.75rem;">${sentimentIcon} ${this.escapeHtml(intent)}</span>
-                <span class="muted small">${this.escapeHtml(lead)}</span>
+              <div class="history-caller-cell">
+                <span class="history-caller-num">
+                  <span style="font-size:0.85rem;">${caller.includes('+') ? '📞' : '🌐'}</span>
+                  ${this.escapeHtml(caller)}
+                </span>
+                <span class="history-call-meta" title="${this.escapeHtml(cid)}">
+                  #${this.escapeHtml(shortId)} · ${when}
+                </span>
               </div>
             </td>
-            <td class="query-cell" title="${this.escapeHtml(summary)}">
-              <span style="font-size:0.85rem; line-height:1.3;">${this.escapeHtml(summary)}</span>
-            </td>
-            <td class="muted small">${when}</td>
             <td>
-              <button class="btn btn-sm" style="font-size:0.75rem; padding: 4px 8px;" onclick="window.__appInstance.openTranscriptModal('${this.escapeHtml(c.call_id || "")}')">
-                View Transcript
+              <div style="display:flex; flex-direction:column; gap:3px;">
+                <span style="font-weight:600; font-size:0.85rem;">${dur}</span>
+                <span class="tag" style="font-size:0.68rem; padding:1px 6px; align-self:flex-start;">${langLabel}</span>
+              </div>
+            </td>
+            <td>
+              <div class="history-summary-text" title="${this.escapeHtml(summary)}">
+                ${this.escapeHtml(summary)}
+              </div>
+            </td>
+            <td style="text-align: right;">
+              <button 
+                type="button" 
+                class="btn-transcript" 
+                title="View full turn-by-turn conversation dialogue"
+                onclick="event.stopPropagation(); window.__appInstance.openTranscriptModal('${this.escapeHtml(cid)}')">
+                💬 Transcript ${turnsCount > 0 ? `(${turnsCount})` : ''}
               </button>
             </td>
           </tr>
@@ -823,57 +887,8 @@ class VoiceAgentApp {
   }
 
   async loadRecentTranscripts() {
-    if (!this.transcriptsBody) return;
-    try {
-      const res = await fetch("/api/transcripts/recent?limit=10");
-      const data = await res.json();
-      const transcripts = data.transcripts || [];
-
-      if (transcripts.length === 0) {
-        this.transcriptsBody.innerHTML = `
-          <tr>
-            <td colspan="7" class="muted">No call transcripts recorded in MongoDB yet. Make a call to see live transcripts.</td>
-          </tr>
-        `;
-        return;
-      }
-
-      this.transcriptsBody.innerHTML = transcripts
-        .map((t) => {
-          const cid = t.call_id || "—";
-          const caller = t.caller_number || "Web";
-          const lang = t.language || "gu-IN";
-          const dur = this.formatDuration(t.duration_seconds || 0);
-          const turns = t.turn_count || (t.turns ? t.turns.length : 0);
-          const when = t.created_at ? new Date(t.created_at).toLocaleString() : "—";
-
-          return `
-          <tr>
-            <td><code class="mono">${this.escapeHtml(cid)}</code></td>
-            <td>${this.escapeHtml(caller)}</td>
-            <td><span class="tag" style="font-size:0.75rem;">${this.escapeHtml(lang)}</span></td>
-            <td>${dur}</td>
-            <td><span class="tag" style="font-size:0.75rem;">${turns} turns</span></td>
-            <td class="muted small">${when}</td>
-            <td>
-              <button class="btn btn-sm btn-primary" style="font-size:0.75rem; padding: 4px 10px;" onclick="window.__appInstance.openTranscriptModal('${this.escapeHtml(cid)}')">
-                View Dialogue
-              </button>
-            </td>
-          </tr>
-        `;
-        })
-        .join("");
-    } catch (e) {
-      console.error("Transcripts load error:", e);
-      if (this.transcriptsBody) {
-        this.transcriptsBody.innerHTML = `
-          <tr>
-            <td colspan="7" class="muted" style="color:var(--danger)">Error loading transcripts from server.</td>
-          </tr>
-        `;
-      }
-    }
+    // Redirects to loadCallHistory() to keep single unified widget synced
+    return this.loadCallHistory();
   }
 
   async openTranscriptModal(callId) {
