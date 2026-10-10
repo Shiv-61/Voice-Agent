@@ -66,10 +66,7 @@ DATABASE_URL = os.getenv(
 )
 
 # ---- MongoDB (Call Transcripts & History) ----
-MONGODB_URI = os.getenv(
-    "MONGODB_URI",
-    "mongodb+srv://Temp-user:shivgowda%40448@cluster0.llp7ahv.mongodb.net/?appName=Cluster0",
-)
+MONGODB_URI = os.getenv("MONGODB_URI", "")
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "voice_agent")
 
 # ---- Server & Network (Render & Local) ----
