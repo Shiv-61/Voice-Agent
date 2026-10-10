@@ -367,9 +367,41 @@ def is_filler_phrase(text: str) -> bool:
         return False
     clean = text.strip()
     # Explicitly protect mandatory hold phrases
-    if HOLD_PHRASE_REGEX.match(clean):
-        return False
     return any(r.match(clean) for r in COMPILED_FILLER_REGEX)
+
+
+GREETING_PATTERNS = {
+    "hello", "hi", "hey", "halo", "namaste", "namaskar", "namaskaram",
+    "kem cho", "kem chho", "kemcho", "kemchho", "good morning", "good afternoon",
+    "good evening", "good day", "kaise ho", "kya haal hai", "kya haal",
+    "નમસ્તે", "નમસ્કાર", "કેમ છો", "કેમછો", "હેલો", "હાય", "સુપ્રભાત",
+    "नमस्ते", "नमस्कार", "हेलो", "हाय", "सुप्रभात", "कैसे हो", "क्या हाल है", "प्रणाम"
+}
+
+
+def is_simple_greeting(text: str) -> bool:
+    """
+    Returns True if the utterance is solely or primarily a conversational greeting
+    without asking any factual, academic, or institutional question.
+    """
+    if not text:
+        return False
+    clean = re.sub(r'[.,!?।;:\-_"\'(){}\[\]<>/\\#*&~`+=]', ' ', text.strip().lower())
+    words = clean.split()
+    if not words:
+        return False
+    joined = " ".join(words)
+    if joined in GREETING_PATTERNS or clean.strip() in GREETING_PATTERNS:
+        return True
+    if len(words) <= 3 and any(g in joined for g in ["hello", "hi", "hey", "namaste", "kem cho", "કેમ છો", "नमस्ते"]):
+        question_words = {
+            "fee", "fees", "admission", "marks", "result", "cpi", "syllabus", "hostel",
+            "placement", "package", "branch", "cutoff", "eligibility",
+            "ફી", "પ્રવેશ", "માર્ક્સ", "હાજરી", "फीસ", "दाखिला", "नंबर", "कटऑफ"
+        }
+        if not (set(words) & question_words):
+            return True
+    return False
 
 
 
@@ -429,8 +461,12 @@ def is_noise_hallucination(text: str, audio_dur: float = 1.0, audio_rms: float =
     if not text:
         return True
     cleaned = text.strip()
-    # 1. Punctuation only or empty
-    if not re.search(r"[\w\u0900-\u097F\u0A80-\u0AFF]", cleaned):
+    # 1. Punctuation only, empty, or completely devoid of English, Hindi, or Gujarati characters
+    if not re.search(r"[a-zA-Z0-9\u0900-\u097F\u0A80-\u0AFF]", cleaned):
+        return True
+
+    # 1b. Discard transcripts containing non-target Indic scripts (Odia, Telugu, Kannada, etc.)
+    if re.search(r"[\u0980-\u0a7f\u0b00-\u0d7f]", cleaned):
         return True
 
     # 2. Very short audio or low RMS that produced common single-word silence hallucinations

@@ -5,6 +5,7 @@ Serves the Glassmorphic Web UI, PDF RAG Upload APIs, DB Explorer APIs, and Real-
 
 import asyncio
 import base64
+import collections
 import json
 import os
 import re
@@ -1033,9 +1034,10 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     stream_id = None
     call_id = None
     audio_chunks: list[bytes] = []
+    pre_speech_buffer: collections.deque = collections.deque(maxlen=12)  # ~240ms of pre-speech audio
     is_speech_active = False
     last_speech_time = 0.0
-    vad_threshold = 0.024
+    vad_threshold = 0.018  # Optimal sensitivity for telephony
     consecutive_speech = 0
     consecutive_barge = 0
     active_turn_task = None
@@ -1118,16 +1120,32 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
     async def process_caller_audio(raw_pcm: bytes):
         nonlocal active_turn_task, stream_id, call_id
-        dur = len(raw_pcm) / 32000.0
-        if dur < 0.45:
+        if not raw_pcm:
             return
+
+        # Resample entire contiguous turn cleanly if mu-law (8kHz)
+        if is_mulaw:
+            dur = len(raw_pcm) / 16000.0  # 8000 samples/sec * 2 bytes/sample
+            if dur < 0.35:
+                return
+            try:
+                import audioop
+                pcm_16k, _ = audioop.ratecv(raw_pcm, 2, 1, 8000, 16000, None)
+            except Exception:
+                pcm_16k = raw_pcm
+        else:
+            dur = len(raw_pcm) / 32000.0  # 16000 samples/sec * 2 bytes/sample
+            if dur < 0.35:
+                return
+            pcm_16k = raw_pcm
+
         # Package into 16kHz mono WAV
         out_bio = io.BytesIO()
         with wave.open(out_bio, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(16000)
-            wf.writeframes(raw_pcm)
+            wf.writeframes(pcm_16k)
         wav_data = out_bio.getvalue()
 
         transcript, detected_lang = await asyncio.to_thread(stt.transcribe, wav_data, None)
@@ -1137,7 +1155,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
         try:
             # Dynamically determine the active turn language for telephony voice synthesis
-            turn_lang, bcp47, _ = llm.detect_turn_language(transcript, detected_lang)
+            turn_lang, bcp47, _ = llm.detect_turn_language(transcript, fallback_lang=llm.current_lang, stt_lang=detected_lang)
             print(f"🎤 [vobiz-ws] Caller [{bcp47}]: {transcript}")
             if call_id:
                 db.log_call_query(call_id, transcript, lang=bcp47)
@@ -1238,12 +1256,17 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
                 chunk_bytes = base64.b64decode(b64_chunk)
                 if is_mulaw:
-                    from utils import mulaw_to_pcm16_16k
-                    pcm_16k_chunk = mulaw_to_pcm16_16k(chunk_bytes)
+                    try:
+                        import audioop
+                        pcm_chunk = audioop.ulaw2lin(chunk_bytes, 2)
+                    except Exception:
+                        from utils.audio_utils import _MULAW_DECODE_TABLE
+                        import struct
+                        pcm_chunk = struct.pack(f"<{len(chunk_bytes)}h", *[_MULAW_DECODE_TABLE[b] for b in chunk_bytes])
                 else:
-                    pcm_16k_chunk = chunk_bytes
+                    pcm_chunk = chunk_bytes
 
-                pcm = np.frombuffer(pcm_16k_chunk, dtype=np.int16)
+                pcm = np.frombuffer(pcm_chunk, dtype=np.int16)
                 if len(pcm) == 0:
                     continue
 
@@ -1268,7 +1291,8 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                             if stream_id:
                                 clear_msg["streamId"] = stream_id
                             await websocket.send_text(json.dumps(clear_msg))
-                            audio_chunks = [pcm_16k_chunk]
+                            audio_chunks = [pcm_chunk]
+                            pre_speech_buffer.clear()
                             is_speech_active = True
                             last_speech_time = asyncio.get_running_loop().time()
                     else:
@@ -1282,21 +1306,29 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     if consecutive_speech >= 2:
                         if not is_speech_active:
                             is_speech_active = True
-                        audio_chunks.append(pcm_16k_chunk)
+                            # Prepend pre-speech buffer so initial consonants (like "H" in "Hello") are not clipped
+                            audio_chunks.extend(list(pre_speech_buffer))
+                            pre_speech_buffer.clear()
+                        audio_chunks.append(pcm_chunk)
                         last_speech_time = asyncio.get_running_loop().time()
+                    else:
+                        pre_speech_buffer.append(pcm_chunk)
                 else:
                     consecutive_speech = 0
                     if is_speech_active:
-                        audio_chunks.append(pcm_16k_chunk)
+                        audio_chunks.append(pcm_chunk)
                         # Check 0.55s silence commit
                         now = asyncio.get_running_loop().time()
                         if now - last_speech_time >= 0.55:
                             is_speech_active = False
                             total_pcm = b"".join(audio_chunks)
                             audio_chunks = []
+                            pre_speech_buffer.clear()
                             if active_turn_task and not active_turn_task.done():
                                 active_turn_task.cancel()
                             active_turn_task = asyncio.create_task(process_caller_audio(total_pcm))
+                    else:
+                        pre_speech_buffer.append(pcm_chunk)
 
             elif event in ("playedStream", "clearedAudio"):
                 is_playing_event.clear()

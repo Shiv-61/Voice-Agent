@@ -5,6 +5,7 @@ Speech-to-text layer supporting:
 """
 
 import io
+import re
 import wave
 import numpy as np
 
@@ -164,7 +165,44 @@ class STT:
             response = self.sarvam_client.speech_to_text.transcribe(**kwargs)
             transcript = response.transcript.strip() if hasattr(response, "transcript") and response.transcript else ""
             detected_lang = getattr(response, "language_code", None) or lang or "en-IN"
-            return transcript, self._normalize_lang(detected_lang)
+            norm_lang = self._normalize_lang(detected_lang)
+
+            # Prevent Sarvam from hallucinating non-supported Indic languages (e.g. Odia 'or-IN', Kannada 'kn-IN')
+            # or non-supported scripts (Odia \u0b00-\u0b7f, Bengali \u0980-\u09ff, etc.)
+            # on short English words like "hello", "hi", "yes". The university agent only serves Gujarati, Hindi, English.
+            has_unsupported_script = bool(re.search(r"[\u0980-\u0a7f\u0b00-\u0d7f]", transcript))
+            if (norm_lang not in ("gu-IN", "hi-IN", "en-IN") or has_unsupported_script) and not language_code:
+                try:
+                    retry_kwargs = {
+                        "file": ("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
+                        "model": config.STT_MODEL,
+                        "mode": config.STT_MODE,
+                        "language_code": "en-IN",
+                    }
+                    retry_resp = self.sarvam_client.speech_to_text.transcribe(**retry_kwargs)
+                    retry_trans = retry_resp.transcript.strip() if hasattr(retry_resp, "transcript") and retry_resp.transcript else ""
+                    if retry_trans and not re.search(r"[\u0980-\u0a7f\u0b00-\u0d7f]", retry_trans):
+                        print(f"[stt] Corrected non-target language '{norm_lang}' ('{transcript}') -> en-IN: '{retry_trans}'")
+                        return retry_trans, "en-IN"
+                except Exception as retry_err:
+                    print(f"[stt] en-IN retry notice: {retry_err}")
+
+                try:
+                    retry_kwargs = {
+                        "file": ("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
+                        "model": config.STT_MODEL,
+                        "mode": config.STT_MODE,
+                        "language_code": "gu-IN",
+                    }
+                    retry_resp = self.sarvam_client.speech_to_text.transcribe(**retry_kwargs)
+                    retry_trans = retry_resp.transcript.strip() if hasattr(retry_resp, "transcript") and retry_resp.transcript else ""
+                    if retry_trans and not re.search(r"[\u0980-\u0a7f\u0b00-\u0d7f]", retry_trans):
+                        print(f"[stt] Corrected non-target language '{norm_lang}' ('{transcript}') -> gu-IN: '{retry_trans}'")
+                        return retry_trans, "gu-IN"
+                except Exception as retry_err:
+                    print(f"[stt] gu-IN retry notice: {retry_err}")
+
+            return transcript, norm_lang
         except Exception as e:
             err_str = str(e)
             print(f"[stt] Sarvam STT notice: {err_str}")

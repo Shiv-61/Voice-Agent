@@ -16,6 +16,7 @@ from rag import RAGStore
 from utils import (
     is_hangup_intent,
     is_agent_farewell,
+    is_simple_greeting,
     clean_speech_text,
     is_prompt_leak,
     HOLD_PHRASES,
@@ -387,13 +388,15 @@ class LLM:
         except Exception as e:
             print(f"[llm] Anticipatory DB notice: {e}")
 
-        # 3. Anticipatory RAG query (suppressed for un-identified personal student queries)
+        # 3. Anticipatory RAG query (suppressed for simple greetings, chit-chat, or un-identified personal student queries)
         matches = []
-        if not (is_personal_student_query and not student):
+        is_greeting = is_simple_greeting(clean_user_text)
+        needs_rag = query_needs_db_or_rag(clean_user_text, has_student=bool(student))
+        if not is_greeting and needs_rag and not (is_personal_student_query and not student):
             try:
                 rag_query = expand_multilingual_query(clean_user_text)
-                matches = self.rag.query_documents(rag_query, n_results=4, min_similarity=0.25)
-                if matches and matches[0].get("similarity_score", 0) >= 0.25:
+                matches = self.rag.query_documents(rag_query, n_results=4, min_similarity=0.40)
+                if matches and matches[0].get("similarity_score", 0) >= 0.40:
                     for m in matches:
                         text_snippet = m.get("text", "").strip()
                         if text_snippet:
