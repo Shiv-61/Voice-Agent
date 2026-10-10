@@ -1063,18 +1063,28 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     continue
                 try:
                     with io.BytesIO(wav_bytes) as bio, wave.open(bio, "rb") as wf:
+                        in_sr = wf.getframerate()
+                        in_ch = wf.getnchannels()
+                        in_sw = wf.getsampwidth()
                         pcm_bytes = wf.readframes(wf.getnframes())
                 except Exception:
+                    in_sr = 22050
+                    in_ch = 1
+                    in_sw = 2
                     pcm_bytes = wav_bytes[44:] if wav_bytes.startswith(b"RIFF") else wav_bytes
 
                 if is_mulaw:
                     from utils import pcm16_16k_to_mulaw
-                    out_bytes = pcm16_16k_to_mulaw(pcm_bytes)
+                    out_bytes = pcm16_16k_to_mulaw(wav_bytes)
                     out_content_type = "audio/x-mulaw"
                     out_sample_rate = 8000
                     chunk_size = 160  # 20ms at 8kHz mono mu-law (Vobiz standard)
                 else:
-                    out_bytes = pcm_bytes
+                    import audioop
+                    if in_sr != 16000:
+                        out_bytes, _ = audioop.ratecv(pcm_bytes, in_sw, in_ch, in_sr, 16000, None)
+                    else:
+                        out_bytes = pcm_bytes
                     out_content_type = "audio/x-l16"
                     out_sample_rate = 16000
                     chunk_size = 320  # 20ms at 16kHz linear PCM

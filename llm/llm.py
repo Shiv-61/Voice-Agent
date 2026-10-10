@@ -138,8 +138,8 @@ _HIN_INDICATORS: frozenset[str] = frozenset({
 _ENG_INDICATORS: frozenset[str] = frozenset({
     "what", "when", "where", "how", "why", "who", "which", "is", "are", "can",
     "tell", "eligibility", "fee", "fees", "admission", "curfew", "placement",
-    "package", "attendance", "marks", "thank", "goodbye", "hello", "hi", "yes",
-    "no", "please", "english", "syllabus", "course", "subject", "semester",
+    "package", "attendance", "marks", "thank", "goodbye",
+    "please", "english", "syllabus", "course", "subject", "semester",
     "credit", "curriculum", "department", "hostel", "rules", "campus", "direct",
 })
 
@@ -180,6 +180,18 @@ class LLM:
         lower = clean.lower()
         words = set(re.findall(r'\b[a-zA-Z]+\b', lower))
 
+        # 0. Standalone phone greetings (e.g. 'hello', 'hi', 'hey', 'halo', 'namaste'):
+        # Callers in Gujarat universally answer the phone with 'Hello' as a telephone habit.
+        # This MUST NOT switch the agent to English. Retain active conversation language (default Gujarati).
+        if is_simple_greeting(clean):
+            fb = (fallback_lang or "gu").lower()
+            if "hi" in fb:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि).]:\n"
+            elif "en" in fb:
+                return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
+            else:
+                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Respond in primary language: GUJARATI (ગુજરાતી લિપિ).]:\n"
+
         # 1. Native script detection (100% definitive)
         if re.search(r"[\u0900-\u097f]", clean):
             return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
@@ -209,11 +221,15 @@ class LLM:
             return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
         if guj_overlap > 0 and guj_overlap >= hin_overlap and guj_overlap >= eng_overlap:
             return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
-        if eng_overlap > 0 and eng_overlap >= hin_overlap and eng_overlap >= guj_overlap:
+
+        # Only switch to English if the user speaks a FULL English line/sentence
+        # (at least 2 English indicators or at least 3 English words with an indicator, not a generic greeting)
+        is_full_english_line = (eng_overlap >= 2) or (eng_overlap >= 1 and len(words) >= 3 and not (words & _GUJ_INDICATORS) and not (words & _HIN_INDICATORS))
+        if is_full_english_line and eng_overlap >= hin_overlap and eng_overlap >= guj_overlap:
             return "en", "en-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in ENGLISH. You MUST respond 100% in ENGLISH.]:\n"
 
         # Check acoustic STT language hint for neutral queries (e.g. 'Aarav Patel', 'STU1')
-        if stt_lang:
+        if stt_lang and not is_simple_greeting(clean):
             stt_l = stt_lang.lower()
             if "hi" in stt_l:
                 return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
@@ -391,6 +407,7 @@ class LLM:
         # 3. Anticipatory RAG query (suppressed for simple greetings, chit-chat, or un-identified personal student queries)
         matches = []
         is_greeting = is_simple_greeting(clean_user_text)
+        self._last_turn_was_greeting = is_greeting
         needs_rag = query_needs_db_or_rag(clean_user_text, has_student=bool(student))
         if not is_greeting and needs_rag and not (is_personal_student_query and not student):
             try:
@@ -659,6 +676,20 @@ class LLM:
         """
         messages = self._prepare_messages(user_text, stt_lang=stt_lang)
         turn_lang = self.current_lang
+
+        # Direct response for phone greetings (e.g. 'hello', 'hi', 'kem cho')
+        if getattr(self, "_last_turn_was_greeting", False):
+            greeting_map = {
+                "gu": "નમસ્તે! હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા બોલું છું. હું તમારી શું મદદ કરી શકું?",
+                "hi": "नमस्ते! मैं डीडीयू आईटी डिपार्टमेंट से प्रिया बोल रही हूँ। मैं आपकी क्या मदद कर सकती हूँ?",
+                "en": "Hello! I am Priya from DDU IT department. How can I help you today?",
+            }
+            exact_greeting = greeting_map.get(turn_lang, greeting_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_greeting})
+            yield exact_greeting
+            return
+
         needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
         hold_phrase = HOLD_PHRASES.get(turn_lang, HOLD_PHRASES["gu"])
         hold_phrase_yielded = False
@@ -883,6 +914,20 @@ class LLM:
         """
         messages = self._prepare_messages(user_text, stt_lang=stt_lang)
         turn_lang = self.current_lang
+
+        # Direct response for phone greetings (e.g. 'hello', 'hi', 'kem cho')
+        if getattr(self, "_last_turn_was_greeting", False):
+            greeting_map = {
+                "gu": "નમસ્તે! હું ડીડીયુ આઈટી ડિપાર્ટમેન્ટમાંથી પ્રિયા બોલું છું. હું તમારી શું મદદ કરી શકું?",
+                "hi": "नमस्ते! मैं डीडीयू आईटी डिपार्टमेंट से प्रिया बोल रही हूँ। मैं आपकी क्या मदद कर सकती हूँ?",
+                "en": "Hello! I am Priya from DDU IT department. How can I help you today?",
+            }
+            exact_greeting = greeting_map.get(turn_lang, greeting_map["gu"])
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": exact_greeting})
+            yield exact_greeting
+            return
+
         needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
         hold_phrase = HOLD_PHRASES.get(turn_lang, HOLD_PHRASES["gu"])
         hold_phrase_yielded = False

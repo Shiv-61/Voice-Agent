@@ -66,26 +66,44 @@ def mulaw_to_pcm16_16k(mulaw_bytes: bytes) -> bytes:
     return struct.pack(f"<{len(resampled_samples)}h", *resampled_samples)
 
 
-def pcm16_16k_to_mulaw(pcm16_bytes: bytes) -> bytes:
+def pcm16_16k_to_mulaw(pcm16_bytes: bytes, in_sample_rate: int = 22050) -> bytes:
     """
-    Convert 16kHz 16-bit signed PCM (from TTS) into 8kHz G.711 mu-law telephony audio.
+    Convert PCM or WAV audio from TTS (default 22050Hz from Sarvam AI, or 16000Hz from Edge-TTS)
+    into 8kHz G.711 mu-law telephony audio with zero pitch or speed distortion.
     Used for outbound playAudio events over Vobiz telephony stream.
     """
     if not pcm16_bytes:
         return b""
 
+    in_sr = in_sample_rate
+    pcm_raw = pcm16_bytes
+
+    # If full WAV bytes were provided, dynamically inspect the true sample rate from header
+    if pcm16_bytes.startswith(b"RIFF"):
+        try:
+            import io, wave
+            with io.BytesIO(pcm16_bytes) as bio, wave.open(bio, "rb") as wf:
+                in_sr = wf.getframerate()
+                pcm_raw = wf.readframes(wf.getnframes())
+        except Exception:
+            pcm_raw = pcm16_bytes[44:]
+
     if HAS_AUDIOOP:
         try:
-            pcm_8k, _ = audioop.ratecv(pcm16_bytes, 2, 1, 16000, 8000, None)
+            if in_sr != 8000:
+                pcm_8k, _ = audioop.ratecv(pcm_raw, 2, 1, in_sr, 8000, None)
+            else:
+                pcm_8k = pcm_raw
             return audioop.lin2ulaw(pcm_8k, 2)
         except Exception:
             pass
 
-    # Pure Python fallback: decimate 16kHz -> 8kHz (take every other sample) and encode
-    n_samples = len(pcm16_bytes) // 2
+    # Pure Python fallback: decimate -> 8kHz and encode
+    n_samples = len(pcm_raw) // 2
     if n_samples == 0:
         return b""
-    samples = struct.unpack(f"<{n_samples}h", pcm16_bytes[:n_samples * 2])
-    # Downsample by 2
-    samples_8k = samples[::2]
+    samples = struct.unpack(f"<{n_samples}h", pcm_raw[:n_samples * 2])
+    step = max(1, in_sr // 8000)
+    samples_8k = samples[::step]
     return bytes(_linear_to_mulaw_sample(s) for s in samples_8k)
+
