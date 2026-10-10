@@ -120,26 +120,35 @@ def expand_multilingual_query(text: str) -> str:
 
 # Fix #13: Pre-compiled frozensets compiled once at import time for O(1) per-turn intersection
 _GUJ_INDICATORS: frozenset[str] = frozenset({
-    "shu", "ketli", "ketla", "ketlu", "che", "chhe", "maate", "mate", "nathi", "aapo",
-    "tame", "tamara", "tamari", "tamaru", "aavde", "janavo", "kem", "vishe",
-    "pucho", "aabhar", "namaste", "gujarati", "kai", "kayi", "bhanela", "kaho",
-    "mane", "aapjo", "haji", "haju", "maru", "maro", "mari", "mara", "mare", "dikro",
-    "dikra", "dikri", "chokro", "chokra", "chokri", "su", "chho", "chhu",
-    "karvanu", "karvo", "batavo", "aavshe", "karo", "joie", "joiye", "barabar",
-    "saras", "bolu", "boljo", "muki", "muko", "karjo", "pan", "ane", "suche", "kahu"
+    "shu", "ketli", "ketla", "ketlu", "ketlo", "che", "chhe", "chho", "chhu", "maate", "mate", "nathi", "aapo",
+    "aapjo", "tame", "tamne", "tamara", "tamari", "tamaru", "tamaro", "tamare", "aavde", "aavadse", "janavo",
+    "janavjo", "kem", "vishe", "pucho", "puchjo", "aabhar", "namaste", "gujarati", "kai", "kayi", "kayo", "kayu",
+    "kyo", "bhanela", "bhanva", "kaho", "kahu", "kejo", "mane", "haji", "haju", "maru", "maro", "mari", "mara",
+    "mare", "dikro", "dikra", "dikri", "chokro", "chokra", "chokri", "su", "karvanu", "karvo", "karvi", "karva",
+    "batavo", "batavjo", "aavshe", "aave", "aavyo", "aavi", "aavya", "karo", "karjo", "karsho", "joie", "joiye",
+    "joye", "barabar", "saras", "saaru", "saru", "bolu", "boljo", "bolo", "bol", "muki", "muko", "pan", "ane",
+    "suche", "nu", "nnu", "ni", "nni", "no", "nno", "na", "nna", "num", "ne", "thi", "mathi", "maathi", "upar",
+    "male", "malse", "malshe", "mali", "malya", "hu", "hun", "hoon", "apne", "aapne", "apdu", "aapdu", "apda",
+    "aapda", "apdi", "aapdi", "amne", "tene", "tenu", "teni", "teno", "tena", "emne", "enu", "eni", "eno", "ena",
+    "kya", "kyan", "kyathi", "kyare", "kon", "kone", "koni", "konu", "kona", "kashu", "hato", "hati", "hatu",
+    "hata", "hoy", "hoyse", "thay", "thase", "thashe", "thayu", "thaya", "thayi", "khabar", "vaat", "vastu",
+    "mahiti", "mahitie", "thodu", "thoda", "thodi", "vadhu", "ochhu", "ochha", "ochhi", "badha", "badhi", "badhu",
+    "tamam", "bijo", "biji", "bija", "aaje", "kaale", "kal", "pahela", "pachi", "andar", "bahar", "samjao",
+    "desho", "lavo", "lai", "moklo", "mokljo"
 })
 
 _HIN_INDICATORS: frozenset[str] = frozenset({
-    "kya", "kitna", "kitni", "kitne", "hai", "hain", "ho", "hoon", "hun", "batao", "bata", "bataiye",
-    "sakate", "sakthi", "sakthe", "hoga", "hogi", "hoge", "nahi", "nahin", "na", "kripya",
-    "aapki", "aapka", "aapke", "aap", "tum", "kaise", "kuch", "baare", "mein", "aur", "chahiye",
-    "dena", "dijiye", "kaun", "kaha", "kahan", "kab", "hindi", "mujhe", "mera",
-    "meri", "mere", "uska", "uski", "uske", "unka", "unki", "unke", "beta", "beti",
-    "naam", "bolo", "boliye", "raha", "rahi", "rahe", "tha", "thi", "thhe",
-    "iski", "iska", "iske", "inki", "inka", "inke", "hum", "humara", "humari",
-    "achha", "accha", "theek", "shukriya", "dhanyawad", "dhanyavad", "ki", "ka", "ke", "ko", "se", "toh",
-    "bhai", "yaar", "ji", "kardo", "kar", "de", "rakh", "rakho", "kaat", "kat",
-    "par", "pe", "sirf", "bas", "ab", "abhi", "bhi"
+    "kya", "kitna", "kitni", "kitne", "hai", "hain", "ho", "hoon", "hun", "batao", "bata", "bataiye", "batayein",
+    "sakta", "sakti", "sakte", "sakate", "sakthi", "sakthe", "hoga", "hogi", "hoge", "hua", "hui", "hue",
+    "nahi", "nahin", "na", "mat", "kripya", "aapki", "aapka", "aapke", "aap", "tum", "kaise", "kaisa", "kaisi",
+    "kuch", "baare", "mein", "me", "aur", "chahiye", "dena", "dijiye", "de", "do", "kaun", "kaha", "kahan",
+    "kidhar", "kab", "kyon", "kyu", "kyun", "hindi", "mujhe", "mera", "meri", "mere", "uska", "uski", "uske",
+    "unka", "unki", "unke", "beta", "beti", "naam", "bolo", "boliye", "kaho", "kahiye", "raha", "rahi", "rahe",
+    "tha", "thi", "the", "thhe", "iski", "iska", "iske", "inki", "inka", "inke", "hum", "humara", "humari",
+    "humare", "achha", "accha", "theek", "shukriya", "dhanyawad", "dhanyavad", "ki", "ka", "ke", "ko", "se",
+    "toh", "to", "bhai", "yaar", "ji", "kardo", "kar", "karo", "kijiye", "rakh", "rakho", "kaat", "kat",
+    "par", "pe", "sirf", "bas", "ab", "abhi", "bhi", "milega", "milegi", "milenge", "milta", "milti", "milte",
+    "sun", "suno", "suniye", "bhejo", "pata", "bahut", "zyada", "kam", "pehle", "baad"
 })
 
 _ALL_INDIC_WORDS: frozenset[str] = _GUJ_INDICATORS | _HIN_INDICATORS
@@ -151,6 +160,62 @@ _ENG_INDICATORS: frozenset[str] = frozenset({
     "please", "english", "syllabus", "course", "subject", "semester",
     "credit", "curriculum", "department", "hostel", "rules", "campus", "direct",
 })
+
+# English grammar/question words that distinguish a genuine English sentence from isolated keywords/loanwords
+_ENGLISH_GRAMMAR_WORDS: frozenset[str] = frozenset({
+    "what", "when", "where", "how", "why", "who", "which", "whose", "whom",
+    "is", "are", "am", "was", "were", "can", "could", "would", "should", "will",
+    "shall", "do", "does", "did", "tell", "please", "give", "explain", "help",
+    "provide", "show", "may", "about", "have", "has", "had"
+})
+
+# Comprehensive English vocabulary: only sentences with 100% words in this set can qualify as full English lines
+_COMMON_ENGLISH_WORDS: frozenset[str] = frozenset({
+    "what", "when", "where", "how", "why", "who", "which", "whose", "whom",
+    "is", "are", "am", "was", "were", "be", "been", "being", "can", "could",
+    "would", "should", "will", "shall", "may", "might", "must", "do", "does",
+    "did", "have", "has", "had", "having", "the", "a", "an", "this", "that",
+    "these", "those", "it", "its", "i", "me", "my", "mine", "you", "your",
+    "yours", "he", "him", "his", "she", "her", "hers", "we", "us", "our",
+    "ours", "they", "them", "their", "theirs", "in", "on", "at", "to", "for",
+    "with", "about", "from", "by", "into", "through", "during", "before",
+    "after", "above", "below", "between", "under", "of", "off", "over", "again",
+    "further", "then", "once", "and", "but", "or", "so", "if", "because",
+    "as", "until", "while", "both", "all", "any", "some", "no", "not", "only",
+    "own", "same", "than", "too", "very", "just", "now", "here", "there",
+    "tell", "please", "help", "give", "show", "know", "want", "like", "need",
+    "provide", "share", "explain", "detail", "details", "information", "info",
+    "admission", "admissions", "fee", "fees", "hostel", "hostels", "curfew",
+    "placement", "placements", "package", "packages", "highest", "average",
+    "syllabus", "course", "courses", "subject", "subjects", "semester",
+    "semesters", "exam", "exams", "examination", "gate", "attendance", "marks",
+    "grade", "grades", "result", "results", "eligibility", "criteria",
+    "process", "procedure", "department", "college", "university", "ddu",
+    "btech", "mtech", "bachelor", "master", "engineering", "faculty", "campus",
+    "library", "canteen", "scholarship", "scholarships", "timing", "timings",
+    "contact", "number", "email", "address", "location", "student", "students",
+    "name", "id", "hello", "hi", "hey", "good", "morning", "afternoon",
+    "evening", "thank", "thanks", "thankyou", "bye", "goodbye", "yes", "okay",
+    "ok", "fine", "sure", "sorry", "excuse", "sir", "madam", "mam", "maam",
+    "call", "agent", "assistant", "speak", "talk", "understand", "english",
+    "rule", "rules", "structure", "annual", "year", "first", "second", "third",
+    "fourth", "last", "direct", "credit", "credits", "curriculum", "branch",
+    "branches", "computer", "information", "technology", "mechanical",
+    "chemical", "civil", "electrical", "ec", "ic", "ch", "cl", "mh", "ce", "it",
+    "top", "recruiter", "recruiters", "company", "companies", "job", "jobs",
+    "offer", "offers", "salary", "salaries", "lpa", "ctc", "internship",
+    "internships", "project", "projects", "study", "learn", "teach", "teaching",
+    "question", "questions", "ask", "asking", "answer", "answers", "query",
+    "queries", "inform", "more", "much", "many", "good", "better", "best",
+    "time", "times"
+})
+
+# Words that overlap between English and Romanized Indic spellings (e.g. 'the', 'me', 'to', 'do', 'no', 'so', 'he', 'or')
+# Must not trigger false Indic classification when used in English sentences
+_DUAL_INDIC_ENG_WORDS: frozenset[str] = frozenset({"the", "me", "to", "do", "no", "so", "he", "or"})
+_UNAMBIGUOUS_GUJ_INDICATORS: frozenset[str] = _GUJ_INDICATORS - _DUAL_INDIC_ENG_WORDS
+_UNAMBIGUOUS_HIN_INDICATORS: frozenset[str] = _HIN_INDICATORS - _DUAL_INDIC_ENG_WORDS
+_UNAMBIGUOUS_INDIC_WORDS: frozenset[str] = _UNAMBIGUOUS_GUJ_INDICATORS | _UNAMBIGUOUS_HIN_INDICATORS
 
 # Words that indicate Hindi even when phonetically written in Gujarati script
 _HINDI_IN_GUJ_WORDS: frozenset[str] = frozenset({
@@ -244,39 +309,41 @@ class LLM:
         if "hindi" in words:
             return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller requested HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी).]:\n"
 
-        guj_overlap = len(words & _GUJ_INDICATORS)
-        hin_overlap = len(words & _HIN_INDICATORS)
-        eng_overlap = len(words & _ENG_INDICATORS)
+        guj_overlap = len(words & _UNAMBIGUOUS_GUJ_INDICATORS)
+        hin_overlap = len(words & _UNAMBIGUOUS_HIN_INDICATORS)
 
-        # Check if caller used ANY Hindi, Hinglish, Gujarati, or Gujlish words
-        has_any_indic_word = bool(words & _ALL_INDIC_WORDS)
+        # Check if caller used ANY Hindi, Hinglish, Gujarati, or Gujlish words (excluding dual English words like 'the', 'me')
+        has_any_indic_word = bool(words & _UNAMBIGUOUS_INDIC_WORDS)
 
-        # STRICT LANGUAGE HOLDING RULE:
+        # STRICT LANGUAGE HOLDING & INDIC RESOLUTION RULE:
         # If EVEN ONE word in user's speech is other than English (Hindi, Hinglish, Gujarati, Gujlish),
         # the agent MUST HOLD that previous language without changing to English!
         fb = (fallback_lang or "gu").lower()
         if has_any_indic_word:
-            # If predominantly Hindi (e.g. 'fees kitni hai?', 'admission kaise milega'):
-            if hin_overlap >= 2 and hin_overlap > guj_overlap and hin_overlap >= eng_overlap:
-                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
-            # If predominantly Gujarati (e.g. 'fees ketli chhe?', 'admission kem male'):
-            if guj_overlap >= 2 and guj_overlap > hin_overlap and guj_overlap >= eng_overlap:
+            if guj_overlap > hin_overlap:
                 return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in GUJARATI (Primary). You MUST respond 100% in GUJARATI using native Gujarati script (ગુજરાતી). Do NOT use Hindi or English.]:\n"
-
-            # Otherwise (mixed sentence with Indic token like 'bhai', 'na', 'chhe', 'kardo', etc.):
-            # HOLD THE PREVIOUS LANGUAGE WITHOUT CHANGING TO ENGLISH!
-            if "hi" in fb:
-                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Hindi/Hinglish token. Hold active language: HINDI (हिंदी लिपि). Every single word must be in Hindi.]:\n"
+            elif hin_overlap > guj_overlap:
+                return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller asked in HINDI. You MUST respond 100% in HINDI using native Devanagari script (हिंदी लिपि). Every single word must be in Hindi. Do NOT use any Gujarati words or Gujarati characters under any circumstances.]:\n"
             else:
-                return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used non-English token. Hold active language: GUJARATI (ગુજરાતી લિપિ).]:\n"
+                # Tie or shared Indic tokens (e.g. 'karo', 'to', 'par', etc.) -> HOLD ACTIVE CONVERSATION LANGUAGE
+                if "hi" in fb:
+                    return "hi", "hi-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used Hindi/Hinglish token. Hold active language: HINDI (हिंदी लिपि). Every single word must be in Hindi.]:\n"
+                else:
+                    return "gu", "gu-IN", "[DYNAMIC LANGUAGE DIRECTIVE: Caller used non-English token. Hold active language: GUJARATI (ગુજરાતી લિપિ).]:\n"
 
-        # ONLY switch to English if the user speaks a FULL 100% English line with ZERO Indic words
+        # ONLY switch to English if the user speaks a genuine English sentence:
+        # 1. Zero Indic words (has_any_indic_word == False).
+        # 2. Caller explicitly asked for English ("english" in words)
+        #    OR the sentence consists predominantly of recognized English words (>= 70% English ratio),
+        #       contains at least one English grammatical/question marker, and has >= 2 words.
+        eng_count = len(words & _COMMON_ENGLISH_WORDS)
+        eng_ratio = (eng_count / len(words)) if words else 0.0
+        has_english_grammar = bool(words & _ENGLISH_GRAMMAR_WORDS)
         is_full_english_line = (
             not has_any_indic_word
             and (
                 "english" in words
-                or eng_overlap >= 2
-                or (eng_overlap >= 1 and len(words) >= 3)
+                or (len(words) >= 2 and eng_ratio >= 0.70 and has_english_grammar and eng_count >= 2)
             )
         )
         if is_full_english_line:
