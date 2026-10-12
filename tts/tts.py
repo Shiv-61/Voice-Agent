@@ -32,6 +32,9 @@ EDGE_VOICE_MAP = {
 }
 
 
+_TTS_CACHE: dict[tuple[str, str], bytes] = {}
+
+
 class TTS:
     def __init__(self):
         self.client = None
@@ -110,6 +113,11 @@ class TTS:
         text = text.strip()[:300]
         lang = normalize_lang(language_code, default="gu-IN")
 
+        cache_key = (text, lang)
+        if cache_key in _TTS_CACHE:
+            return _TTS_CACHE[cache_key]
+
+        audio_bytes = b""
         # 1. Try Sarvam AI if configured and quota is intact
         if self.client and not self._sarvam_quota_exceeded:
             try:
@@ -120,7 +128,7 @@ class TTS:
                     speaker=config.TTS_SPEAKER,
                 )
                 if response.audios and len(response.audios) > 0:
-                    return base64.b64decode(response.audios[0])
+                    audio_bytes = base64.b64decode(response.audios[0])
             except Exception as e:
                 err_str = str(e)
                 if "402" in err_str or "insufficient_quota" in err_str:
@@ -130,7 +138,12 @@ class TTS:
                     print(f"[tts] Sarvam notice for '{text[:40]}…': {e}")
 
         # 2. Resilient Edge-TTS fallback
-        return self._synthesize_edge(text, lang)
+        if not audio_bytes:
+            audio_bytes = self._synthesize_edge(text, lang)
+
+        if audio_bytes:
+            _TTS_CACHE[cache_key] = audio_bytes
+        return audio_bytes
 
     def speak_local(self, text: str, language_code: str = "gu-IN"):
         """Synthesize and play through local speakers (CLI mode only)."""

@@ -88,3 +88,6 @@ ENABLE_ACOUSTIC_FILLER = os.getenv("ENABLE_ACOUSTIC_FILLER", "false").lower() in
 SILENCE_TIMEOUT_SECONDS = int(os.getenv("SILENCE_TIMEOUT_SECONDS", "8"))
 MAX_SILENCE_CHECKS = int(os.getenv("MAX_SILENCE_CHECKS", "2"))
 MAX_FAREWELL_WAIT_SECONDS = float(os.getenv("MAX_FAREWELL_WAIT_SECONDS", "5.0"))
+
+# ---- Voice Activity Detection (VAD) & Telephony Endpointing ----
+VAD_SILENCE_TIMEOUT_MS = int(os.getenv("VAD_SILENCE_TIMEOUT_MS", "400"))  # 0.40s endpoint for telephony snappy turn-taking

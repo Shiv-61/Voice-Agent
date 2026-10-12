@@ -5,6 +5,7 @@ for structured SQL database and unstructured RAG knowledge base.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 from typing import Generator, AsyncGenerator, Any
@@ -27,6 +28,9 @@ from utils import (
     get_error_message,
     ABUSIVE_CALM_PROMPTS,
     WHO_ARE_YOU_PROMPTS,
+    extract_semester,
+    is_semester_query,
+    get_semester_clarification_phrase,
 )
 from config.prompt_loader import (
     get_welcome_message,
@@ -238,10 +242,24 @@ class LLM:
         self.active_student_id: str | None = None
         self.active_student_name: str | None = None
         self._active_provider = config.LLM_PROVIDER
+        self._http_client: httpx.AsyncClient | None = None
         # Initialize conversation history with the assistant's opening welcome message
         self.history: list[dict[str, str]] = [
             {"role": "assistant", "content": WELCOME_MESSAGE}
         ]
+
+    async def get_http_client(self) -> httpx.AsyncClient:
+        """Returns a reused persistent httpx client with connection pooling."""
+        if self._http_client is None or self._http_client.is_closed:
+            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10, keepalive_expiry=60.0)
+            self._http_client = httpx.AsyncClient(timeout=35.0, limits=limits)
+        return self._http_client
+
+    @contextlib.asynccontextmanager
+    async def _borrow_client(self):
+        """Borrows persistent HTTP client without closing it on block exit."""
+        client = await self.get_http_client()
+        yield client
 
     def detect_turn_language(self, text: str, fallback_lang: str = "gu", stt_lang: str | None = None) -> tuple[str, str, str]:
         """
@@ -650,6 +668,19 @@ class LLM:
                 results = self.rag.query_documents(query, n_results=4)
                 if not results:
                     return json.dumps({"message": "No relevant policy documents found in knowledge base."})
+                if results and results[0].get("metadata", {}).get("clarification"):
+                    return json.dumps({
+                        "clarification_required": True,
+                        "prompt": results[0]["metadata"].get("clarification_prompt", "Which semester (1 to 8) syllabus are you looking for?"),
+                    })
+                if results and results[0].get("metadata", {}).get("semester"):
+                    sem = results[0]["metadata"]["semester"]
+                    return json.dumps({
+                        "semester": sem,
+                        "program": "B.Tech IT",
+                        "curriculum": results[0]["text"],
+                        "instruction": f"State the subjects and credits for Semester {sem} briefly and clearly in the caller's language.",
+                    })
                 summarized_docs = [
                     f"Excerpt from {r['metadata'].get('filename', 'doc')} (Page {r['metadata'].get('page', 1)}): {r['text']}"
                     for r in results
@@ -1135,6 +1166,28 @@ class LLM:
             yield exact_farewell
             return
 
+        # Direct zero-latency clarification if caller asked about semester syllabus without semester number
+        if is_semester_query(user_text) and extract_semester(user_text) is None:
+            clarification_phrase = get_semester_clarification_phrase(turn_lang)
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": clarification_phrase})
+            yield clarification_phrase
+            return
+
+        # Deterministic RAG Pre-fetch for Semester Syllabus queries
+        sem_requested = extract_semester(user_text)
+        if sem_requested is not None and is_semester_query(user_text):
+            rag_docs = self.rag.query_documents(user_text, n_results=1)
+            if rag_docs and not rag_docs[0].get("metadata", {}).get("clarification"):
+                curriculum_text = rag_docs[0]["text"]
+                context_injection = (
+                    f"\n\n[DETERMINISTIC CONTEXT: Verified official curriculum for B.Tech IT Semester {sem_requested}:\n"
+                    f"{curriculum_text}\n"
+                    f"Instruction: Summarize the main subjects and total credits for Semester {sem_requested} concisely in {turn_lang}. "
+                    f"Do NOT call search_university_docs since verified data is already provided above.]"
+                )
+                messages[-1]["content"] += context_injection
+
         needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
         hold_phrase = HOLD_PHRASES.get(turn_lang, HOLD_PHRASES["gu"])
         hold_phrase_yielded = False
@@ -1147,7 +1200,7 @@ class LLM:
         current_iteration = 0
 
         try:
-            async with httpx.AsyncClient(timeout=35.0) as client:
+            async with self._borrow_client() as client:
                 while current_iteration < max_tool_iterations:
                     current_iteration += 1
                     url, headers, payload = self._get_provider_request(messages)
@@ -1300,13 +1353,27 @@ class LLM:
                         if not clean_text.strip():
                             turn_lang, _, _ = self.detect_turn_language(user_text, fallback_lang=self.current_lang)
                             lower_u = user_text.lower()
-                            if any(w in lower_u for w in ["સેમેસ્ટર", "સેમ", "સિલેબસ", "અભ્યાસક્રમ", "વિષય", "semester", "syllabus", "subject"]):
-                                if turn_lang == "gu":
-                                    clean_text = "ડીડીયુ આઈટી સેમેસ્ટર 1 માં મેથેમેટિક્સ-1, બેઝિક પ્રોગ્રામિંગ અને એન્જિનિયરિંગ ફાઉન્ડેશન વિષયો સામેલ છે. શું તમારે ચોક્કસ વિષય કે ક્રેડિટ વિશે વધુ જાણવું છે?"
-                                elif turn_lang == "hi":
-                                    clean_text = "डीडीयू आईटी सेमेस्टर 1 में मैथमेटिक्स-1, प्रोग्रामिंग और इंजीनियरिंग विषय शामिल हैं। क्या आप किसी विशेष विषय या क्रेडिट के बारे में जानना चाहते हैं?"
+                            sem_detected = extract_semester(user_text)
+                            if any(w in lower_u for w in ["સેમેસ્ટર", "સેમ", "સિલેબસ", "અભ્યાસક્રમ", "વિષય", "semester", "syllabus", "subject"]) or sem_detected:
+                                sem_target = sem_detected if sem_detected else 1
+                                rag_docs = self.rag.query_documents(user_text, n_results=1)
+                                if rag_docs and not rag_docs[0].get("metadata", {}).get("clarification"):
+                                    doc_txt = rag_docs[0]["text"]
+                                    if turn_lang == "gu":
+                                        clean_text = f"ડીડીયુ આઈટી સેમેસ્ટર {sem_target} ના મુખ્ય વિષયો: {doc_txt[:180]}..."
+                                    elif turn_lang == "hi":
+                                        clean_text = f"डीडीयू आईटी सेमेस्टर {sem_target} के मुख्य विषय: {doc_txt[:180]}..."
+                                    else:
+                                        clean_text = f"DDU IT Semester {sem_target} courses include: {doc_txt[:180]}..."
+                                elif rag_docs and rag_docs[0].get("metadata", {}).get("clarification"):
+                                    clean_text = rag_docs[0]["metadata"].get("clarification_prompt", "Which semester syllabus do you want?")
                                 else:
-                                    clean_text = "DDU IT Semester 1 includes Mathematics-1, Basic Programming, and Engineering fundamentals. Would you like specific details on subjects or credits?"
+                                    if turn_lang == "gu":
+                                        clean_text = f"ડીડીયુ આઈટી સેમેસ્ટર {sem_target} નો અભ્યાસક્રમ ઉપલબ્ધ છે. શું તમારે ચોક્કસ વિષય કે ક્રેડિટ વિશે જાણવું છે?"
+                                    elif turn_lang == "hi":
+                                        clean_text = f"डीडीयू आईटी सेमेस्टर {sem_target} का पाठ्यक्रम उपलब्ध है। क्या आप किसी विशेष विषय या क्रेडिट के बारे में जानना चाहते हैं?"
+                                    else:
+                                        clean_text = f"DDU IT Semester {sem_target} curriculum is available. Would you like details on specific subjects or credits?"
                             elif any(w in lower_u for w in ["fee", "fees", "ફી", "ખર્ચ", "फी", "फीस"]):
                                 if turn_lang == "gu":
                                     clean_text = "ડીડીયુ બીટેક પ્રથમ વર્ષની વાર્ષિક ટ્યુશન ફી ૧,૬૬,૯૫૦ રૂપિયા અને બીજાથી ચોથા વર્ષ માટે ૧,૫૨,૦૦૦ રૂપિયા છે, જ્યારે એમટેક પ્રથમ વર્ષની ફી ૫૫,૧૨૫ રૂપિયા છે."

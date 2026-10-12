@@ -25,6 +25,13 @@ from .text_utils import (
 from .audio_utils import mulaw_to_pcm16_16k, pcm16_16k_to_mulaw
 from .call_state_machine import CallSessionStateMachine, CallState, VirtualClock
 from .latency_tracker import TurnLatencyRecord, latency_manager
+from .semester_parser import (
+    extract_semester,
+    is_semester_query,
+    extract_batch_year,
+    normalize_rag_query,
+    get_semester_clarification_phrase,
+)
 
 __all__ = [
     "split_ready_sentences",
@@ -53,5 +60,10 @@ __all__ = [
     "VirtualClock",
     "TurnLatencyRecord",
     "latency_manager",
+    "extract_semester",
+    "is_semester_query",
+    "extract_batch_year",
+    "normalize_rag_query",
+    "get_semester_clarification_phrase",
 ]
 

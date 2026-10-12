@@ -16,6 +16,12 @@ import chromadb
 from chromadb.config import Settings
 
 import config
+from utils.semester_parser import (
+    extract_semester,
+    is_semester_query,
+    normalize_rag_query,
+    get_semester_clarification_phrase,
+)
 
 
 class RAGStore:
@@ -36,6 +42,7 @@ class RAGStore:
         print(f"[rag] Vector Store initialized at '{persist_dir}'. Active chunks: {self.collection.count()}")
         self.has_pgvector = False
         self._embed_model = None
+        self._rag_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._check_pgvector()
         self._auto_seed_sample_pdf()
 
@@ -94,6 +101,17 @@ class RAGStore:
                         content = f.read()
                     self.ingest_pdf(content, "DDU_Fees_Structure.pdf")
                     print("[rag] Auto-seeded DDU_Fees_Structure.pdf into vector store.")
+
+            if "BTech_IT_2026-2030_Syllabus_File.pdf" not in indexed_names:
+                syllabus_pdf = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    "data", "documents", "BTech_IT_2026-2030_Syllabus_File.pdf"
+                )
+                if os.path.exists(syllabus_pdf):
+                    with open(syllabus_pdf, "rb") as f:
+                        content = f.read()
+                    self.ingest_pdf(content, "BTech_IT_2026-2030_Syllabus_File.pdf")
+                    print("[rag] Auto-seeded BTech_IT_2026-2030_Syllabus_File.pdf into vector store.")
         except Exception as e:
             print(f"[rag] Auto-seed notice: {e}")
 
@@ -272,6 +290,166 @@ class RAGStore:
                     "Competitions: Sui Overflow 2025 Greece 1st place ($30,000 + $10k AWS credits, Abhimanyu Ajudiya team), ETHGlobal 2026 New Delhi 2nd place ($1,500), Codeversity 2026 IIT Gandhinagar 1st place (₹70,000).\n"
                     "GATE 2026: 29 students >90 percentile (topper Darpan Vora AIR 596 DA, AIR 3353 CS). NCAT 2025: Patel Nisarg AIR 35.\n"
                     "10 research papers presented in international conferences during 2025-2026."
+                ),
+            },
+        ]
+
+    def _get_syllabus_semantic_chunks(self) -> list[dict[str, Any]]:
+        """Returns structured high-density semantic chunks for DDU B.Tech IT Syllabus (Semesters 1 to 8)."""
+        return [
+            {
+                "page": 2,
+                "semester": 1,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 1 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 1 Subjects and Teaching Scheme:\n"
+                    "1. Mathematics – I (Credits: 4, Exam Marks: 100)\n"
+                    "2. Basic Electrical Engineering (Credits: 5, Exam Marks: 150)\n"
+                    "3. Problem Solving using C (Credits: 5.5, Exam Marks: 150)\n"
+                    "4. Engineering Graphics & Design (Credits: 3, Exam Marks: 100)\n"
+                    "5. Software Workshop (Credits: 1, Exam Marks: 50)\n"
+                    "6. Yoga & Indian Knowledge System (Credits: 2, Exam Marks: 90)\n"
+                    "Total Semester 1 Credits: 20.5 credits. Total Examination Marks: 640 marks."
+                ),
+            },
+            {
+                "page": 2,
+                "semester": 2,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 2 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 2 Subjects and Teaching Scheme:\n"
+                    "1. Mathematics – II (Credits: 4, Exam Marks: 100)\n"
+                    "2. Problem Solving using C++ (Credits: 5.5, Exam Marks: 150)\n"
+                    "3. Physics (Credits: 5, Exam Marks: 150)\n"
+                    "4. Hardware Workshop (Credits: 2, Exam Marks: 100)\n"
+                    "5. English (Credits: 3, Exam Marks: 90)\n"
+                    "6. Environmental Studies (Credits: 0, Exam Marks: 40)\n"
+                    "Total Semester 2 Credits: 19.5 credits. Total Examination Marks: 630 marks."
+                ),
+            },
+            {
+                "page": 3,
+                "semester": 3,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 3 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 3 Subjects and Teaching Scheme:\n"
+                    "1. Probability Theory and Statistics (Credits: 4, Exam Marks: 100)\n"
+                    "2. Design of Digital Circuits (Credits: 5, Exam Marks: 150)\n"
+                    "3. Effective Technical Communication (Credits: 3, Exam Marks: 100)\n"
+                    "4. Object Oriented Programming using Java (Credits: 5, Exam Marks: 150)\n"
+                    "5. Data Structures and Algorithms (Credits: 5, Exam Marks: 150)\n"
+                    "Total Semester 3 Credits: 22 credits. Total Examination Marks: 650 marks."
+                ),
+            },
+            {
+                "page": 3,
+                "semester": 4,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 4 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 4 Subjects and Teaching Scheme:\n"
+                    "1. Universal Human Values – II (Credits: 3, Exam Marks: 60)\n"
+                    "2. Discrete Mathematics (Credits: 4, Exam Marks: 100)\n"
+                    "3. Computer and Communication Networks (Credits: 5, Exam Marks: 150)\n"
+                    "4. Database Management System (Credits: 5, Exam Marks: 150)\n"
+                    "5. Design & Analysis of Algorithm (Credits: 5, Exam Marks: 150)\n"
+                    "6. Advanced Java Technology (Credits: 5, Exam Marks: 150)\n"
+                    "Total Semester 4 Credits: 27 credits. Total Examination Marks: 760 marks."
+                ),
+            },
+            {
+                "page": 4,
+                "semester": 5,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 5 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 5 Subjects and Teaching Scheme:\n"
+                    "1. Computer Organisation (Credits: 3, Exam Marks: 100)\n"
+                    "2. Theory of Automata & Formal Language (Credits: 4, Exam Marks: 100)\n"
+                    "3. Microprocessor Programming and Interfacing (Credits: 5, Exam Marks: 150)\n"
+                    "4. Development Operations (DevOps) (Credits: 1, Exam Marks: 50)\n"
+                    "5. Professional Elective Course - 1 (Credits: 5, Exam Marks: 150)\n"
+                    "6. Professional Elective Course - 2 (Credits: 5, Exam Marks: 150)\n"
+                    "7. Open Elective - 1 (IT Entrepreneurship) (Credits: 3, Exam Marks: 100)\n"
+                    "Total Semester 5 Credits: 26 credits. Total Examination Marks: 800 marks."
+                ),
+            },
+            {
+                "page": 4,
+                "semester": 6,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 6 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 6 Subjects and Teaching Scheme:\n"
+                    "1. Language Translator (Credits: 5, Exam Marks: 150)\n"
+                    "2. Applied Operating System (Credits: 5, Exam Marks: 150)\n"
+                    "3. App Development (Credits: 5, Exam Marks: 150)\n"
+                    "4. Professional Elective Course - 3 (Credits: 5, Exam Marks: 150)\n"
+                    "5. Open Elective - 2 (Data Analysis & Information Extraction) (Credits: 3, Exam Marks: 100)\n"
+                    "6. Data Analytics using Python (Credits: 1, Exam Marks: 50)\n"
+                    "7. Project – I (Credits: 1, Exam Marks: 50)\n"
+                    "Total Semester 6 Credits: 25 credits. Total Examination Marks: 800 marks."
+                ),
+            },
+            {
+                "page": 5,
+                "semester": 7,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 7 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 7 Subjects and Teaching Scheme:\n"
+                    "1. Constitution of India (Credits: 0, Audit Course)\n"
+                    "2. Professional Elective Course - 4 (Credits: 5, Exam Marks: 150)\n"
+                    "3. Open Elective - 3 (Artificial Intelligence) (Credits: 3, Exam Marks: 100)\n"
+                    "4. Professional Elective Course - 5 (Credits: 5, Exam Marks: 150)\n"
+                    "5. Professional Elective Course - 6 (Credits: 5, Exam Marks: 150)\n"
+                    "6. Project – II (Credits: 1, Exam Marks: 50)\n"
+                    "Total Semester 7 Credits: 19 credits. Total Examination Marks: 600 marks."
+                ),
+            },
+            {
+                "page": 5,
+                "semester": 8,
+                "program": "B.Tech IT",
+                "doc_type": "syllabus",
+                "category": "college_curriculum",
+                "text": (
+                    "DDU B.Tech IT - Semester 8 Course Structure & Syllabus:\n"
+                    "Department of Information Technology, Dharmsinh Desai University (DDU), Nadiad.\n"
+                    "Semester 8 Subjects and Teaching Scheme:\n"
+                    "1. Industrial Internship (Credits: 18, Exam Marks: 500)\n"
+                    "Professional Elective Courses (PEC) Tracks across B.Tech IT curriculum:\n"
+                    "• Full Stack Development & Cloud Computing\n"
+                    "• Software Engineering & Advanced Algorithms\n"
+                    "• Cyber Security & Internet of Things (IoT)\n"
+                    "• Machine Learning & Deep Learning, Digital Image Processing\n"
+                    "• Distributed Computing & Advanced Operating System\n"
+                    "• Web Technology & Natural Language Processing (NLP)\n"
+                    "Total Semester 8 Credits: 18 credits. Total Examination Marks: 500 marks."
                 ),
             },
         ]
@@ -461,6 +639,8 @@ class RAGStore:
                     "chunk_index": chunk_counter,
                     "upload_time": upload_time,
                     "category": category,
+                    "batch_year": 2026,
+                    "doc_type": "placements",
                 })
 
         # Inject high-density semantic chunks for Fees Structure
@@ -479,26 +659,78 @@ class RAGStore:
                     "chunk_index": chunk_counter,
                     "upload_time": upload_time,
                     "category": category,
+                    "doc_type": "fees",
                 })
+
+        # Inject high-density semantic chunks for B.Tech IT Syllabus (Semesters 1 to 8)
+        is_syllabus_doc = any(k in lower_fn for k in ["syllabus", "curriculum", "btech"])
+        if is_syllabus_doc:
+            specialized = self._get_syllabus_semantic_chunks()
+            for item in specialized:
+                chunk_counter += 1
+                p_num = item.get("page", 1)
+                chunk_id = f"{doc_id}_sem{item['semester']}_c{chunk_counter}"
+                all_ids.append(chunk_id)
+                all_chunks.append(item["text"])
+                all_metadatas.append({
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page": p_num,
+                    "chunk_index": chunk_counter,
+                    "upload_time": upload_time,
+                    "category": category,
+                    "program": item.get("program", "B.Tech IT"),
+                    "semester": int(item["semester"]),
+                    "doc_type": "syllabus",
+                })
+
+        current_sem = None
         for page_idx, page in enumerate(reader.pages, start=1):
             page_text = page.extract_text() or ""
             if not page_text.strip():
                 continue
 
+            if is_syllabus_doc:
+                sem_match = re.search(r"B\.\s*TECH\.?\s*SEMESTER\s*[–\-]\s*([IVX]+|\d+)", page_text, re.IGNORECASE)
+                if sem_match:
+                    raw_s = sem_match.group(1).upper()
+                    parsed_s = extract_semester(f"sem {raw_s}")
+                    if parsed_s:
+                        current_sem = parsed_s
+                if page_idx in (1, 2, 3, 4, 5):
+                    continue
+
             page_chunks = self._chunk_text(page_text)
             for chunk in page_chunks:
+                cleaned = chunk.strip()
+                if len(cleaned) < 40:
+                    continue
                 chunk_counter += 1
                 chunk_id = f"{doc_id}_p{page_idx}_c{chunk_counter}"
                 all_ids.append(chunk_id)
-                all_chunks.append(chunk)
-                all_metadatas.append({
+
+                chunk_text = cleaned
+                meta_item = {
                     "doc_id": doc_id,
                     "filename": filename,
                     "page": page_idx,
                     "chunk_index": chunk_counter,
                     "upload_time": upload_time,
                     "category": category,
-                })
+                }
+                if is_syllabus_doc and current_sem:
+                    chunk_text = f"DDU B.Tech IT - Semester {current_sem} Syllabus - Detailed Course Content:\n{cleaned}"
+                    meta_item["semester"] = int(current_sem)
+                    meta_item["doc_type"] = "syllabus"
+                    meta_item["program"] = "B.Tech IT"
+                elif any(k in lower_fn for k in ["highlight", "placement"]):
+                    meta_item["batch_year"] = 2026
+                    meta_item["doc_type"] = "placements"
+                elif any(k in lower_fn for k in ["fee", "fees"]):
+                    meta_item["doc_type"] = "fees"
+
+                all_chunks.append(chunk_text)
+                all_metadatas.append(meta_item)
 
         if all_chunks:
             self.collection.add(
@@ -682,10 +914,32 @@ class RAGStore:
         results.sort(key=lambda x: x["similarity_score"], reverse=True)
         return results
 
+    def _apply_hybrid_rerank(self, results: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+        """
+        Combines cosine similarity with keyword scoring (BM25 equivalent).
+        Gives significant boost to exact semester matches and subject names.
+        """
+        if not results:
+            return results
+        q_tokens = set(re.findall(r"\w+", query.lower()))
+        for r in results:
+            doc_lower = r["text"].lower()
+            d_tokens = set(re.findall(r"\w+", doc_lower))
+            overlap = len(q_tokens & d_tokens) / max(len(q_tokens), 1)
+
+            # Base semantic score (0.0 to 1.0)
+            sem_score = r.get("similarity_score", 0.5)
+            # Hybrid combined score
+            comb_score = (0.70 * sem_score) + (0.30 * min(1.0, overlap * 1.5))
+            r["similarity_score"] = round(comb_score, 3)
+
+        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return results
+
     def _query_pgvector(
-        self, query: str, n_results: int = 4, min_similarity: float = 0.25
+        self, query: str, n_results: int = 4, min_similarity: float = 0.25, metadata_filter: dict | None = None
     ) -> list[dict[str, Any]]:
-        """Queries PostgreSQL knowledge_chunks using pgvector cosine distance."""
+        """Queries PostgreSQL knowledge_chunks using pgvector cosine distance with metadata filtering."""
         try:
             import psycopg
             from pgvector.psycopg import register_vector
@@ -694,16 +948,40 @@ class RAGStore:
                 self._embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
             q_emb = self._embed_model.encode([query], normalize_embeddings=True)[0]
+            emb_list = q_emb.tolist()
+            params = [emb_list]
+
+            filter_clauses = []
+            if metadata_filter:
+                if "semester" in metadata_filter and metadata_filter["semester"] is not None:
+                    filter_clauses.append("(metadata->>'semester')::int = %s")
+                    params.append(int(metadata_filter["semester"]))
+                if "doc_type" in metadata_filter and metadata_filter["doc_type"]:
+                    filter_clauses.append("metadata->>'doc_type' = %s")
+                    params.append(str(metadata_filter["doc_type"]))
+                if "batch_year" in metadata_filter and metadata_filter["batch_year"] is not None:
+                    filter_clauses.append("(metadata->>'batch_year')::int = %s")
+                    params.append(int(metadata_filter["batch_year"]))
+
+            where_str = ""
+            if filter_clauses:
+                where_str = "WHERE " + " AND ".join(filter_clauses)
+
+            params.append(emb_list)
+            params.append(n_results * 4)
+
+            sql = f"""
+                SELECT content, source, category, page, metadata,
+                       1 - (embedding <=> %s::vector) AS similarity_score
+                FROM knowledge_chunks
+                {where_str}
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s;
+            """
 
             with psycopg.connect(config.DATABASE_URL) as conn:
                 register_vector(conn)
-                cur = conn.execute("""
-                    SELECT content, source, category, page, metadata,
-                           1 - (embedding <=> %s::vector) AS similarity_score
-                    FROM knowledge_chunks
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s;
-                """, (q_emb.tolist(), q_emb.tolist(), n_results * 4))
+                cur = conn.execute(sql, tuple(params))
                 rows = cur.fetchall()
 
             raw_results = []
@@ -723,60 +1001,70 @@ class RAGStore:
                 })
 
             boosted = self._apply_domain_boosts(raw_results, query)
-            filtered = [r for r in boosted if r["similarity_score"] >= min_similarity]
+            hybrid = self._apply_hybrid_rerank(boosted, query)
+            filtered = [r for r in hybrid if r["similarity_score"] >= min_similarity]
             return filtered[:n_results]
         except Exception as e:
             print(f"[rag] PGVector query notice: {e}")
             return []
 
     def query_documents(
-        self, query: str, n_results: int = 4, min_similarity: float = 0.25
+        self, query: str, n_results: int = 4, min_similarity: float = 0.25, metadata_filter: dict | None = None
     ) -> list[dict[str, Any]]:
         """
-        Queries the vector store with hybrid semantic similarity and domain keyword boosting.
+        Queries the vector store with hybrid semantic similarity and hard metadata filtering.
         Checks active PostgreSQL pgvector collection first, falling back to ChromaDB.
         """
         if not query.strip():
             return []
 
-        # 1. Prefer PostgreSQL pgvector if active (for persistent cloud Render deployment)
+        # 0. Check in-memory TTL cache (1 hour)
+        cache_key = f"{query.strip().lower()}_{json.dumps(metadata_filter or {}, sort_keys=True)}"
+        now = time.time()
+        if cache_key in self._rag_cache:
+            ts, cached_res = self._rag_cache[cache_key]
+            if now - ts < 3600:
+                return cached_res
+
+        # 1. Check if caller asked about semester without specifying which one
+        if is_semester_query(query) and extract_semester(query) is None and not (metadata_filter and "semester" in metadata_filter):
+            return [{
+                "text": "The caller asked about semester curriculum/syllabus but did not specify which semester. Please ask the caller which semester (1 to 8) they are inquiring about.",
+                "metadata": {
+                    "doc_type": "clarification_needed",
+                    "clarification": True,
+                    "clarification_prompt": get_semester_clarification_phrase(getattr(config, "DEFAULT_LANGUAGE", "gu")),
+                },
+                "similarity_score": 1.0,
+            }]
+
+        # 2. Normalize query into canonical English form and extract hard metadata filters
+        norm_query, extracted_filter = normalize_rag_query(query)
+        effective_filter = dict(extracted_filter)
+        if metadata_filter:
+            effective_filter.update(metadata_filter)
+
+        # 3. Prefer PostgreSQL pgvector if active
         if self.has_pgvector:
-            pg_res = self._query_pgvector(query, n_results=n_results, min_similarity=min_similarity)
+            pg_res = self._query_pgvector(norm_query, n_results=n_results, min_similarity=min_similarity, metadata_filter=effective_filter)
             if pg_res:
+                self._rag_cache[cache_key] = (now, pg_res)
                 return pg_res
 
         if self.collection.count() == 0:
             return []
 
-        # Query a candidate pool to allow intelligent hybrid re-ranking
+        # 4. Fallback to ChromaDB with metadata filter
+        chroma_where = {}
+        if "semester" in effective_filter and effective_filter["semester"] is not None:
+            chroma_where["semester"] = int(effective_filter["semester"])
+
         candidate_k = min(max(n_results * 4, 16), self.collection.count())
         results = self.collection.query(
-            query_texts=[query],
+            query_texts=[norm_query],
             n_results=candidate_k,
+            where=chroma_where if chroma_where else None,
         )
-
-        # Detect if query targets a specific academic semester
-        num_to_roman = {
-            "1": ["i", "1", "one", "first", "એક", "૧", "વન", "પહેલું", "પહેલા", "પ્રથમ"],
-            "2": ["ii", "2", "two", "second", "બે", "૨", "ટુ", "ટૂ", "બીજું", "બીજા"],
-            "3": ["iii", "3", "three", "third", "ત્રણ", "૩", "થ્રી", "ત્રીજું", "ત્રીજા"],
-            "4": ["iv", "4", "four", "fourth", "ચાર", "૪", "ફોર", "ચોથું", "ચોથા"],
-            "5": ["v", "5", "five", "fifth", "પાંચ", "૫", "ફાઈવ"],
-            "6": ["vi", "6", "six", "sixth", "છ", "૬", "સિક્સ"],
-            "7": ["vii", "7", "seven", "seventh", "સાત", "૭", "સેવન"],
-            "8": ["viii", "8", "eight", "eighth", "આઠ", "૮", "એઈટ"],
-        }
-        target_sem = None
-        q_lower = query.lower()
-        for s_num, aliases in num_to_roman.items():
-            for a in aliases:
-                if re.search(r"\b(?:sem|semester)\s*[–\-]*(?:ester)?\s*" + re.escape(a) + r"\b", q_lower) or \
-                   re.search(r"\b" + re.escape(a) + r"\s*(?:sem|semester)\b", q_lower) or \
-                   re.search(r"સેમેસ્ટર\s*" + re.escape(a), q_lower):
-                    target_sem = s_num
-                    break
-            if target_sem:
-                break
 
         formatted_results = []
         if results and results.get("documents") and results["documents"][0]:
@@ -785,43 +1073,23 @@ class RAGStore:
             dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
 
             for doc, meta, dist in zip(docs, metas, dists):
-                if not doc or len(doc.strip()) < 60:
-                    continue  # Filter out trivial stub chunks
-
+                if not doc or len(doc.strip()) < 40:
+                    continue
                 d = float(dist) if dist is not None else 0.0
                 similarity = round(max(0.0, min(1.0, 1.0 / (1.0 + max(0.0, d)))), 3)
-
-                # Target semester boost / penalty
-                if target_sem:
-                    doc_lower = doc.lower()
-                    target_aliases = num_to_roman[target_sem]
-                    has_target = any(
-                        re.search(r"(?:semester|sem)\s*[–\-]?\s*" + re.escape(a) + r"\b", doc_lower)
-                        for a in target_aliases
-                    )
-                    if has_target:
-                        similarity = min(1.0, similarity + 0.20)
-                    else:
-                        # Conflicting semester check
-                        has_conflict = False
-                        for other_num, other_aliases in num_to_roman.items():
-                            if other_num != target_sem:
-                                if any(re.search(r"(?:semester|sem)\s*[–\-]?\s*" + re.escape(a) + r"\b", doc_lower) for a in other_aliases):
-                                    has_conflict = True
-                                    break
-                        if has_conflict:
-                            similarity = max(0.0, similarity - 0.15)
-
                 formatted_results.append({
                     "text": doc,
                     "metadata": meta,
                     "similarity_score": round(similarity, 3),
                 })
 
-        # Apply domain boosts for placements, hackathons, competitive exams, papers
-        boosted = self._apply_domain_boosts(formatted_results, query)
-        filtered = [r for r in boosted if r["similarity_score"] >= min_similarity]
-        return filtered[:n_results]
+        boosted = self._apply_domain_boosts(formatted_results, norm_query)
+        hybrid = self._apply_hybrid_rerank(boosted, norm_query)
+        filtered = [r for r in hybrid if r["similarity_score"] >= min_similarity]
+        final_res = filtered[:n_results]
+        self._rag_cache[cache_key] = (now, final_res)
+        return final_res
+
 
     def list_documents(self) -> list[dict[str, Any]]:
         """

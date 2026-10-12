@@ -60,6 +60,8 @@ def setup_pgvector_table(conn):
     conn.execute("""
         CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx
         ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+        CREATE INDEX IF NOT EXISTS knowledge_chunks_metadata_idx
+        ON knowledge_chunks USING gin (metadata);
     """)
     conn.commit()
 
@@ -85,7 +87,7 @@ def extract_and_chunk_pdf(pdf_path: str, rag_store: RAGStore) -> list[dict]:
 
     print(f"📖 Processing '{filename}' ({len(reader.pages)} pages)...")
 
-    # Inject high-density semantic chunks for Highlights of Batch 2026
+    # 1. Inject high-density semantic chunks for Highlights of Batch 2026
     if any(k in lower_fn for k in ["highlight", "2026"]) and any(k in lower_fn for k in ["batch", "highlight", "placement"]):
         specialized = rag_store._get_highlights_semantic_chunks()
         for item in specialized:
@@ -102,12 +104,14 @@ def extract_and_chunk_pdf(pdf_path: str, rag_store: RAGStore) -> list[dict]:
                     "filename": filename,
                     "page": p_num,
                     "category": category,
+                    "batch_year": 2026,
+                    "doc_type": "placements",
                     "chunk_index": chunk_counter,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             })
 
-    # Inject high-density semantic chunks for Fees Structure
+    # 2. Inject high-density semantic chunks for Fees Structure
     if any(k in lower_fn for k in ["fee", "fees"]):
         specialized = rag_store._get_fees_structure_semantic_chunks()
         for item in specialized:
@@ -124,15 +128,57 @@ def extract_and_chunk_pdf(pdf_path: str, rag_store: RAGStore) -> list[dict]:
                     "filename": filename,
                     "page": p_num,
                     "category": category,
+                    "doc_type": "fees",
                     "chunk_index": chunk_counter,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             })
 
+    # 3. Inject high-density semantic chunks for B.Tech IT Syllabus (Semesters 1 to 8)
+    is_syllabus_doc = any(k in lower_fn for k in ["syllabus", "curriculum", "btech"])
+    if is_syllabus_doc:
+        specialized = rag_store._get_syllabus_semantic_chunks()
+        for item in specialized:
+            chunk_counter += 1
+            p_num = item.get("page", 1)
+            chunks_list.append({
+                "content": item["text"],
+                "source": filename,
+                "category": category,
+                "page": p_num,
+                "chunk_index": chunk_counter,
+                "metadata": {
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page": p_num,
+                    "category": category,
+                    "program": item.get("program", "B.Tech IT"),
+                    "semester": int(item["semester"]),
+                    "doc_type": "syllabus",
+                    "chunk_index": chunk_counter,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            })
+
+    import re
+    from utils.semester_parser import extract_semester
+
+    current_sem = None
     for page_idx, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
         if not text.strip():
             continue
+
+        if is_syllabus_doc:
+            sem_match = re.search(r"B\.\s*TECH\.?\s*SEMESTER\s*[–\-]\s*([IVX]+|\d+)", text, re.IGNORECASE)
+            if sem_match:
+                raw_s = sem_match.group(1).upper()
+                parsed_s = extract_semester(f"sem {raw_s}")
+                if parsed_s:
+                    current_sem = parsed_s
+            # Skip course structure summary pages 1..5 because structured chunks cover them cleanly!
+            if page_idx in (1, 2, 3, 4, 5):
+                continue
 
         raw_chunks = rag_store._chunk_text(text)
         for chunk in raw_chunks:
@@ -140,20 +186,34 @@ def extract_and_chunk_pdf(pdf_path: str, rag_store: RAGStore) -> list[dict]:
             if len(cleaned) < 40:
                 continue
             chunk_counter += 1
+
+            chunk_content = cleaned
+            meta_dict = {
+                "doc_id": doc_id,
+                "filename": filename,
+                "page": page_idx,
+                "category": category,
+                "chunk_index": chunk_counter,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            if is_syllabus_doc and current_sem:
+                chunk_content = f"DDU B.Tech IT - Semester {current_sem} Syllabus - Detailed Course Content:\n{cleaned}"
+                meta_dict["semester"] = int(current_sem)
+                meta_dict["doc_type"] = "syllabus"
+                meta_dict["program"] = "B.Tech IT"
+            elif any(k in lower_fn for k in ["highlight", "placement"]):
+                meta_dict["batch_year"] = 2026
+                meta_dict["doc_type"] = "placements"
+            elif any(k in lower_fn for k in ["fee", "fees"]):
+                meta_dict["doc_type"] = "fees"
+
             chunks_list.append({
-                "content": cleaned,
+                "content": chunk_content,
                 "source": filename,
                 "category": category,
                 "page": page_idx,
                 "chunk_index": chunk_counter,
-                "metadata": {
-                    "doc_id": doc_id,
-                    "filename": filename,
-                    "page": page_idx,
-                    "category": category,
-                    "chunk_index": chunk_counter,
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                },
+                "metadata": meta_dict,
             })
 
     print(f"   ✓ Generated {len(chunks_list)} semantic chunks from '{filename}'.")
