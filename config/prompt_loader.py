@@ -97,13 +97,23 @@ def detect_active_domains(user_text: str, retrieved_docs: Optional[list[dict[str
 
     active: set[str] = set()
 
-    # 1. Inspect user query keywords
-    for domain_key, domain_info in domains_cfg.items():
-        keywords = domain_info.get("keywords", [])
-        for kw in keywords:
-            if kw.lower() in lower_text:
-                active.add(domain_key)
-                break
+    # 1. Inspect user query keywords using config domains or default fallback keywords
+    if domains_cfg:
+        for domain_key, domain_info in domains_cfg.items():
+            keywords = domain_info.get("keywords", [])
+            for kw in keywords:
+                if kw.lower() in lower_text:
+                    active.add(domain_key)
+                    break
+    else:
+        default_keywords = {
+            "student_records": ["student", "mark", "grade", "attendance", "result", "cpi", "spi", "stu", "હાજરી", "માર્ક્સ", "अटेंडेंस", "अंक"],
+            "college_curriculum": ["syllabus", "curriculum", "subject", "semester", "credit", "course", "વિષય", "સિલેબસ", "સેમેસ્ટર", "पाठ्यक्रम", "सिलेबस"],
+            "admissions_and_campus": ["admission", "fee", "hostel", "placement", "curfew", "scholarship", "gate", "ફી", "પ્રવેશ", "હોસ્ટેલ", "फीસ", "फी", "प्रवेश"],
+        }
+        for dom_key, kws in default_keywords.items():
+            if any(kw in lower_text for kw in kws):
+                active.add(dom_key)
 
     # 2. Inspect retrieved RAG documents
     if retrieved_docs:
@@ -126,10 +136,16 @@ def detect_active_domains(user_text: str, retrieved_docs: Optional[list[dict[str
 def get_system_prompt(active_domains: Optional[list[str]] = None) -> str:
     """
     Dynamically constructs the system prompt:
-    - Base Persona & Strict Voice Rules
-    - Core University Facts
-    - Triggered Domain Directives (Student Data vs College Curriculum vs Admissions)
-    - Tool Calling Signatures
+    - Base Persona & Description
+    - Call Flow (Steps 1 to 6)
+    - Multilingual Policy
+    - Strict Voice Rules
+    - Hangup and Silence Handling (Global Overrides)
+    - Guardrails & Emotional Intelligence
+    - Prompt Knowledge (Route A) & Answering Style
+    - RAG Instructions (Route B)
+    - Student Records (Route C)
+    - Tool Instructions & Protocol
     """
     cfg = _load_prompts_yaml()
     persona = cfg.get("base_persona", {})
@@ -144,6 +160,13 @@ def get_system_prompt(active_domains: Optional[list[str]] = None) -> str:
         p_desc,
     ]
 
+    # Call Flow
+    call_flow = cfg.get("call_flow", "").strip()
+    if call_flow:
+        parts.append("")
+        parts.append("CALL FLOW (FOLLOW IN ORDER ON EVERY CALL):")
+        parts.append(call_flow)
+
     # Multilingual Priority & Dynamic In-Call Language Switching
     lang_policy = cfg.get("language_policy", {})
     if lang_policy:
@@ -155,13 +178,20 @@ def get_system_prompt(active_domains: Optional[list[str]] = None) -> str:
         for r in lang_policy.get("rules", []):
             parts.append(f"- {r}")
 
-    parts.append("")
-    parts.append("STRICT VOICE RULES:")
-
     # Voice rules
     rules = cfg.get("voice_rules", [])
-    for rule in rules:
-        parts.append(rule)
+    if rules:
+        parts.append("")
+        parts.append("STRICT VOICE RULES:")
+        for rule in rules:
+            parts.append(rule)
+
+    # Hangup and Silence Handling (Global Overrides)
+    hangup_silence = cfg.get("hangup_and_silence_handling", "").strip()
+    if hangup_silence:
+        parts.append("")
+        parts.append("HANGUP COMMAND AND SILENCE HANDLING (GLOBAL OVERRIDES):")
+        parts.append(hangup_silence)
 
     # Guardrails
     guardrails = cfg.get("guardrails", {})
@@ -182,21 +212,41 @@ def get_system_prompt(active_domains: Optional[list[str]] = None) -> str:
             if isinstance(eq_val, dict):
                 g_line = eq_val.get("guideline", "").strip()
                 if g_line:
-                    # Clean bullets into readable compact format
                     cleaned_guideline = " ".join(line.strip().lstrip("- ") for line in g_line.splitlines() if line.strip())
                     parts.append(f"- [{eq_key.replace('_', ' ').title()}]: {cleaned_guideline}")
+            elif isinstance(eq_val, str) and eq_val.strip():
+                parts.append(f"- [{eq_key.replace('_', ' ').title()}]: {eq_val.strip()}")
 
-    parts.append("")
-    parts.append("UNIVERSITY FACTS:")
-    facts = cfg.get("university_facts", [])
-    for fact in facts:
-        parts.append(f"- {fact}")
+    # Prompt Knowledge (Route A - Known Facts) & University Facts
+    facts = cfg.get("prompt_knowledge", []) or cfg.get("university_facts", [])
+    if facts:
+        parts.append("")
+        parts.append("ROUTE A - PROMPT KNOWLEDGE (KNOWN DIRECTLY):")
+        for fact in facts:
+            parts.append(f"- {fact}")
 
-    # Active Domain Directives
+    answering_style = cfg.get("answering_style", "").strip()
+    if answering_style:
+        parts.append(f"Answering Style: {answering_style}")
+
+    # Route B - RAG Instructions
+    rag_inst = cfg.get("rag_instructions", "").strip()
+    if rag_inst:
+        parts.append("")
+        parts.append("ROUTE B - RAG INSTRUCTIONS:")
+        parts.append(rag_inst)
+
+    # Route C - Student Records
+    student_records = cfg.get("student_records", "").strip()
+    if student_records:
+        parts.append("")
+        parts.append("ROUTE C - STUDENT DATABASE:")
+        parts.append(student_records)
+
+    # Active Domain Directives (Legacy compatibility)
     domains_cfg = cfg.get("domains", {})
     selected_domains = active_domains if active_domains is not None else list(domains_cfg.keys())
-
-    if selected_domains:
+    if selected_domains and domains_cfg:
         for dom_key in selected_domains:
             if dom_key in domains_cfg:
                 dom_inst = domains_cfg[dom_key].get("instruction", "").strip()
@@ -204,10 +254,12 @@ def get_system_prompt(active_domains: Optional[list[str]] = None) -> str:
                     parts.append("")
                     parts.append(dom_inst)
 
-    # Tool Instructions
+    # Tool Instructions / Protocol
     tools_str = cfg.get("tool_instructions", "").strip()
     if tools_str:
         parts.append("")
+        parts.append("TOOL PROTOCOL:")
         parts.append(tools_str)
 
     return "\n".join(parts)
+

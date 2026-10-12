@@ -39,6 +39,8 @@ from utils import (
     is_filler_phrase,
     SILENCE_CHECK_PROMPTS,
     FAREWELL_PROMPTS,
+    CallSessionStateMachine,
+    CallState,
 )
 from db import get_shared_mongo_store
 
@@ -515,79 +517,60 @@ class WebVoiceSession:
         self.is_processing = False
         self.last_user_activity = 0.0
         self.agent_speaking_until = 0.0
-        self.silence_prompt_active = False
-        self.inactivity_task = asyncio.create_task(self._inactivity_watchdog())
+        self.sm: Optional[CallSessionStateMachine] = None
+        self._playback_waiter_task: Optional[asyncio.Task] = None
         self._hook_llm_tools()
 
-    async def _inactivity_watchdog(self):
-        """Monitors 7s silence inactivity in active web call sessions strictly after speech completes."""
-        try:
-            while True:
-                await asyncio.sleep(0.5)
-                if not self.call_id or self.is_processing:
-                    continue
-                now = asyncio.get_running_loop().time()
-                if self.last_user_activity == 0.0:
-                    self.last_user_activity = now
-                    continue
+    def _init_state_machine(self):
+        """Initializes the call session state machine for the web call."""
+        if self.sm:
+            self.sm.close()
 
-                # The 7s countdown starts strictly AFTER completion of agent speech playback
-                if now < self.agent_speaking_until:
-                    self.last_user_activity = self.agent_speaking_until
-                    continue
+        async def _handle_silence_check(check_num: int, prompt_text: str, lang: str):
+            cur_l = getattr(self.llm, "current_lang", "gu")
+            bcp47 = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
+            self.llm.record_silence_event(check_num, prompt_text)
+            if self.call_id:
+                db.log_call_query(self.call_id, f"[SYSTEM_EVENT: SILENCE_CHECK_{check_num}]", lang="system")
+            await self.send_json_safe({
+                "event": "agent_partial_text",
+                "text": prompt_text,
+            })
+            audio = await asyncio.to_thread(self.tts.synthesize, prompt_text, bcp47)
+            dur = 0.0
+            if audio:
+                dur = len(audio) / 32000.0
+                self.agent_speaking_until = asyncio.get_running_loop().time() + dur
+                await self.send_bytes_safe(audio)
+            await self.send_json_safe({
+                "event": "agent_done",
+                "full_text": prompt_text,
+                "language": bcp47,
+                "call_hangup": False,
+            })
+            if dur > 0:
+                await asyncio.sleep(dur)
+            if self.sm:
+                self.sm.on_agent_playback_finished()
 
-                idle = now - self.last_user_activity
-                if not self.silence_prompt_active:
-                    if idle >= 7.0:
-                        print("⏱️ [web-ws] 7s silence detected after speech completion. Asking: 'kya aap abhi bhi line par hai'")
-                        self.silence_prompt_active = True
-                        cur_l = getattr(self.llm, "current_lang", "gu")
-                        prompt_text = SILENCE_CHECK_PROMPTS.get(cur_l, SILENCE_CHECK_PROMPTS["gu"])
-                        bcp47 = self.language_code
-                        await self.send_json_safe({
-                            "event": "agent_partial_text",
-                            "text": prompt_text,
-                        })
-                        audio = await asyncio.to_thread(self.tts.synthesize, prompt_text, bcp47)
-                        if audio:
-                            dur = len(audio) / 32000.0
-                            self.agent_speaking_until = asyncio.get_running_loop().time() + dur
-                            await self.send_bytes_safe(audio)
-                        self.last_user_activity = self.agent_speaking_until
-                        await self.send_json_safe({
-                            "event": "agent_done",
-                            "full_text": prompt_text,
-                            "language": bcp47,
-                            "call_hangup": False,
-                        })
-                else:
-                    if idle >= 7.0:
-                        print("⏱️ [web-ws] Inactivity timeout: No response after 7s prompt. Hanging up call.")
-                        cur_l = getattr(self.llm, "current_lang", "gu")
-                        farewell_text = FAREWELL_PROMPTS.get(cur_l, FAREWELL_PROMPTS["gu"])
-                        bcp47 = self.language_code
-                        audio = await asyncio.to_thread(self.tts.synthesize, farewell_text, bcp47)
-                        if audio:
-                            await self.send_bytes_safe(audio)
-                        await self.send_json_safe({
-                            "event": "agent_done",
-                            "full_text": farewell_text,
-                            "language": bcp47,
-                            "call_hangup": True,
-                        })
-                        await asyncio.sleep(1.5)
-                        await self.send_json_safe({
-                            "event": "call_ended",
-                            "call_hangup": True,
-                            "reason": "Inactivity timeout (no response after 7s check)",
-                        })
-                        self.end_call_log()
-                        await fire_hangup_url(call_id=self.call_id, caller_num="Web Portal", reason="inactivity_timeout")
-                        break
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"[web-ws] Inactivity watchdog notice: {e}")
+        async def _handle_silence_timeout():
+            print(f"⏱️ [web-ws] Silence timeout after max checks. Disconnecting call with no further agent speech.")
+            await self.send_json_safe({
+                "event": "call_ended",
+                "call_hangup": True,
+                "reason": "silence_timeout",
+            })
+            cid = self.call_id
+            self.end_call_log()
+            if cid:
+                await fire_hangup_url(call_id=cid, caller_num="Web Portal", reason="silence_timeout")
+
+        self.sm = CallSessionStateMachine(
+            call_id=self.call_id or "CALL-WEB",
+            initial_lang=getattr(self.llm, "current_lang", "gu"),
+            on_silence_check=_handle_silence_check,
+            on_silence_timeout=_handle_silence_timeout,
+        )
 
     async def send_json_safe(self, data: dict):
         """Thread-safe and concurrency-safe JSON transmission over WebSocket."""
@@ -608,6 +591,8 @@ class WebVoiceSession:
     def cancel_active_pipeline(self):
         """Cancels inflight transcription, LLM, and synthesis worker tasks immediately."""
         self.agent_speaking_until = asyncio.get_running_loop().time()
+        if self.sm:
+            self.sm.on_caller_speech_started()
         if self.active_task and not self.active_task.done():
             self.active_task.cancel()
         for t in list(self.pending_synth_tasks):
@@ -625,12 +610,14 @@ class WebVoiceSession:
                 language=self.language_code,
             )
             self.last_user_activity = asyncio.get_running_loop().time()
+            if not self.sm:
+                self._init_state_machine()
         return self.call_id
 
     def end_call_log(self):
         """Closes the session's open call log entry, saves transcript to MongoDB, and runs async post-call CRM extraction."""
-        if hasattr(self, "inactivity_task") and self.inactivity_task and not self.inactivity_task.done():
-            self.inactivity_task.cancel()
+        if self.sm:
+            self.sm.close()
         if self.call_id:
             cid = self.call_id
             # Fix #12: single bulk flush instead of N per-turn writes
@@ -676,6 +663,8 @@ class WebVoiceSession:
                 except Exception:
                     loop = None
 
+            if self.sm:
+                self.sm.on_tool_started(tool_name)
             if loop and loop.is_running():
                 preview = f"{tool_name}({', '.join(f'{k}={v}' for k, v in kwargs.items())})"
                 coro = self.send_json_safe({
@@ -688,7 +677,11 @@ class WebVoiceSession:
                     asyncio.run_coroutine_threadsafe(coro, loop)
                 except Exception as err:
                     print(f"[web-ws] Error sending tool event: {err}")
-            return original_execute(tool_name, kwargs)
+            try:
+                return original_execute(tool_name, kwargs)
+            finally:
+                if self.sm:
+                    self.sm.on_tool_finished(tool_name)
 
         self.llm._execute_tool = wrapped_execute
 
@@ -698,11 +691,12 @@ class WebVoiceSession:
             return
 
         self.is_processing = True
-        self.silence_prompt_active = False
         self.last_user_activity = asyncio.get_running_loop().time()
 
         # Dynamically determine the active turn language for TTS and UI synchronization
         turn_lang, bcp47, _ = self.llm.detect_turn_language(user_text, self.language_code, stt_lang=detected_lang)
+        if self.sm:
+            self.sm.on_caller_transcript_received(user_text, turn_lang)
         self.language_code = bcp47
         active_lang = bcp47
 
@@ -780,7 +774,8 @@ class WebVoiceSession:
         try:
             await asyncio.gather(llm_producer(), tts_consumer())
 
-            should_hangup = is_hangup or is_agent_farewell(full_agent_reply)
+            supervisor_res = self.llm.check_call_hangup_supervisor(user_text, full_agent_reply)
+            should_hangup = supervisor_res["call_hangup"] or is_hangup or is_agent_farewell(full_agent_reply)
 
             # Signal completion with call_hangup flag and active turn language
             await self.send_json_safe({
@@ -790,17 +785,30 @@ class WebVoiceSession:
                 "call_hangup": should_hangup,
             })
 
-            # If hangup condition satisfied (by caller intent or agent farewell), disconnect call
             if should_hangup:
-                print(f"📞 [web-ws] Farewell delivered ({'agent farewell: Thank you for your time. Have a great day!' if is_agent_farewell(full_agent_reply) else 'caller intent'}). Initiating disconnect...")
-                await asyncio.sleep(2.0)  # Allow final farewell speech chunk to finish playing in browser
+                if self.sm:
+                    self.sm.on_hangup_command("caller_hangup_requested")
+                print(f"📞 [web-ws] Hangup confirmed (reason: {supervisor_res.get('reason')}). Waiting for audio drain (max 5s)...")
+                # Wait for audio playback to finish in browser (max 5.0s safety cap)
+                drain_start = asyncio.get_running_loop().time()
+                while asyncio.get_running_loop().time() < self.agent_speaking_until and (asyncio.get_running_loop().time() - drain_start < 5.0):
+                    await asyncio.sleep(0.1)
                 await self.send_json_safe({
                     "event": "call_ended",
                     "call_hangup": True,
                     "reason": "Agent concluded conversation with farewell",
                 })
+                cid = self.call_id
                 self.end_call_log()
-                await fire_hangup_url(call_id=self.call_id, caller_num="Web Portal", reason="caller_hangup_requested")
+                if cid:
+                    await fire_hangup_url(call_id=cid, caller_num="Web Portal", reason="caller_hangup_requested")
+            else:
+                # Normal turn finished: wait for playback completion then start silence timer
+                drain_start = asyncio.get_running_loop().time()
+                while asyncio.get_running_loop().time() < self.agent_speaking_until:
+                    await asyncio.sleep(0.1)
+                if self.sm:
+                    self.sm.on_agent_playback_finished()
         except asyncio.CancelledError:
             print("🛑 [web-ws] Active query pipeline cancelled due to user barge-in.")
             for t in list(self.pending_synth_tasks):
@@ -1015,6 +1023,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
                             "event": "call_started_ack",
                             "call_id": session.call_id,
                         })
+                        session._init_state_machine()
                         # Greet caller with spoken welcome greeting when call is actively started
                         await session.send_json_safe({
                             "event": "agent_partial_text",
@@ -1037,7 +1046,14 @@ async def websocket_call_endpoint(websocket: WebSocket):
                                     session.tts.synthesize, WELCOME_MESSAGE, language_code=session.language_code or "gu-IN"
                                 )
                             if welcome_audio:
+                                dur = len(welcome_audio) / 32000.0
+                                session.agent_speaking_until = asyncio.get_running_loop().time() + dur
                                 await session.send_bytes_safe(welcome_audio)
+                                async def _welcome_drain():
+                                    await asyncio.sleep(dur)
+                                    if session.sm:
+                                        session.sm.on_agent_playback_finished()
+                                asyncio.create_task(_welcome_drain())
                         except Exception as e:
                             print(f"[web-ws] Notice sending welcome audio on call_started: {e}")
                     elif event == "call_ended":
@@ -1297,53 +1313,40 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     last_user_activity = 0.0
     agent_speaking_until = 0.0
     is_compulsory_intro = False
-    silence_prompt_active = False
-    inactivity_task = None
+    sm: Optional[CallSessionStateMachine] = None
+    playback_monitor_task: Optional[asyncio.Task] = None
 
-    async def telephony_inactivity_monitor():
-        """Monitors 7s silence inactivity during live telephone calls strictly after agent speech completes."""
-        nonlocal silence_prompt_active, last_user_activity, stream_id, call_id, caller_num, agent_speaking_until
+    async def handle_vobiz_silence_check(check_num: int, prompt_text: str, lang: str):
+        """Plays exact silence prompt and logs telephony system event."""
+        bcp47_code = "hi-IN" if lang == "hi" else ("en-IN" if lang == "en" else "gu-IN")
+        llm.record_silence_event(check_num, prompt_text)
+        if call_id:
+            db.log_call_query(call_id, f"[SYSTEM_EVENT: SILENCE_CHECK_{check_num}]", lang="system")
+        await send_vobiz_audio(prompt_text, bcp47_code)
+
+    async def handle_vobiz_silence_timeout():
+        """Disconnects call after Check 2 timeout with no further agent speech."""
+        print(f"📞 [vobiz-ws] Silence timeout: Disconnecting stream {stream_id} (no further agent speech)...")
+        await websocket.send_text(json.dumps({
+            "event": "stop",
+            "streamId": stream_id,
+        }))
+        await fire_hangup_url(call_id=call_id, caller_num=caller_num, reason="silence_timeout")
+
+    async def vobiz_playback_monitor():
+        """Monitors audio queue and playback completion to advance the state machine."""
+        nonlocal is_playing_event, agent_speaking_until, sm
         try:
             while True:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.08)
                 now = asyncio.get_running_loop().time()
-                if last_user_activity == 0.0:
-                    continue
-                # Inactivity timer MUST start counting ONLY after the completion of the agent's speech playback!
-                if now < agent_speaking_until or is_playing_event.is_set() or not audio_queue.empty() or is_speech_active:
-                    last_user_activity = max(now, agent_speaking_until)
-                    continue
-
-                idle_seconds = now - last_user_activity
-                if not silence_prompt_active:
-                    if idle_seconds >= 7.0:
-                        print(f"⏱️ [vobiz-ws] Inactivity timeout: 7s silence detected after agent speech completed. Asking caller: 'Are you still on the line?'")
-                        silence_prompt_active = True
-                        cur_l = getattr(llm, "current_lang", "gu")
-                        prompt_msg = SILENCE_CHECK_PROMPTS.get(cur_l, SILENCE_CHECK_PROMPTS["gu"])
-                        bcp47_code = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
-                        await send_vobiz_audio(prompt_msg, bcp47_code)
-                else:
-                    if idle_seconds >= 7.0:
-                        print(f"⏱️ [vobiz-ws] Inactivity timeout: No response after 7s prompt. Concluding call and hanging up...")
-                        cur_l = getattr(llm, "current_lang", "gu")
-                        farewell_msg = FAREWELL_PROMPTS.get(cur_l, FAREWELL_PROMPTS["gu"])
-                        bcp47_code = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
-                        await send_vobiz_audio(farewell_msg, bcp47_code)
-                        while not audio_queue.empty() or asyncio.get_running_loop().time() < agent_speaking_until:
-                            await asyncio.sleep(0.2)
-                        await asyncio.sleep(0.8)
-                        print(f"📞 [vobiz-ws] Inactivity hangup: Disconnecting stream {stream_id}...")
-                        await websocket.send_text(json.dumps({
-                            "event": "stop",
-                            "streamId": stream_id,
-                        }))
-                        await fire_hangup_url(call_id=call_id, caller_num=caller_num, reason="inactivity_timeout")
-                        break
+                if is_playing_event.is_set():
+                    if audio_queue.empty() and now >= agent_speaking_until:
+                        is_playing_event.clear()
+                        if sm:
+                            sm.on_agent_playback_finished()
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            print(f"[vobiz-ws] Inactivity monitor notice: {e}")
 
     async def vobiz_audio_sender():
         """Drains the audio queue sequentially so sentences never interleave."""
@@ -1484,6 +1487,8 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
         try:
             # Dynamically determine the active turn language for telephony voice synthesis
             turn_lang, bcp47, _ = llm.detect_turn_language(transcript, fallback_lang=llm.current_lang, stt_lang=detected_lang)
+            if sm:
+                sm.on_caller_transcript_received(transcript, turn_lang)
             print(f"🎤 [vobiz-ws] Caller [{bcp47}]: {transcript}")
             if call_id:
                 db.log_call_query(call_id, transcript, lang=bcp47)
@@ -1504,14 +1509,24 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                 full_agent_reply += buffer
                 await send_vobiz_audio(buffer.strip(), bcp47)
 
-            should_hangup = is_hangup or is_agent_farewell(full_agent_reply)
+            supervisor_res = llm.check_call_hangup_supervisor(transcript, full_agent_reply)
+            should_hangup = supervisor_res["call_hangup"] or is_hangup or is_agent_farewell(full_agent_reply)
 
             if should_hangup:
-                farewell_origin = "agent farewell: 'Thank you for your time. Have a great day!'" if is_agent_farewell(full_agent_reply) else "caller hangup intent"
-                # Wait for sequential audio queue to empty and currently playing chunk to finish on caller's phone
-                while not audio_queue.empty() or asyncio.get_running_loop().time() < agent_speaking_until:
-                    await asyncio.sleep(0.2)
-                await asyncio.sleep(0.8)  # Telephone network buffer
+                if sm:
+                    sm.on_hangup_command("caller_hangup_requested")
+                # If agent has not spoken farewell yet, deliver the exact closing farewell now
+                if not is_agent_farewell(full_agent_reply):
+                    cur_l = sm.locked_language if sm else "gu"
+                    farewell_msg = sm.get_farewell_phrase(cur_l) if sm else FAREWELL_PROMPTS.get(cur_l, FAREWELL_PROMPTS["gu"])
+                    bcp47_farewell = "hi-IN" if cur_l == "hi" else ("en-IN" if cur_l == "en" else "gu-IN")
+                    await send_vobiz_audio(farewell_msg, bcp47_farewell)
+
+                # Wait for audio playback to complete (capped at 5.0s max wait)
+                drain_start = asyncio.get_running_loop().time()
+                while (not audio_queue.empty() or asyncio.get_running_loop().time() < agent_speaking_until) and (asyncio.get_running_loop().time() - drain_start < 5.0):
+                    await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)  # Telephone network buffer
                 print(f"📞 [vobiz-ws] Farewell delivered to caller. Disconnecting call stream {stream_id}...")
                 await websocket.send_text(json.dumps({
                     "event": "stop",
@@ -1571,13 +1586,31 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     is_mulaw = True
                 db.log_call_start(call_id, caller_number=caller_num, language="gu-IN")
                 print(f"🚀 [vobiz-ws] Phone stream started: streamId={stream_id or '(none)'}, callId={call_id}, format={'mu-law 8kHz' if is_mulaw else 'PCM16 16kHz'}")
+                sm = CallSessionStateMachine(
+                    call_id=call_id,
+                    initial_lang="gu",
+                    on_silence_check=handle_vobiz_silence_check,
+                    on_silence_timeout=handle_vobiz_silence_timeout,
+                )
+                # Wrap LLM tool execution to prevent silence timers while tools run
+                _orig_tool_exec = llm._execute_tool
+                def _wrapped_tool(t_name: str, kw: dict) -> str:
+                    if sm:
+                        sm.on_tool_started(t_name)
+                    try:
+                        return _orig_tool_exec(t_name, kw)
+                    finally:
+                        if sm:
+                            sm.on_tool_finished(t_name)
+                llm._execute_tool = _wrapped_tool
+
+                if playback_monitor_task is None or playback_monitor_task.done():
+                    playback_monitor_task = asyncio.create_task(vobiz_playback_monitor())
+
                 # Greet caller with compulsory opening welcome message in Gujarati over the phone
                 is_compulsory_intro = True
-                silence_prompt_active = False
                 await send_vobiz_audio(WELCOME_MESSAGE, "gu-IN")
                 last_user_activity = asyncio.get_running_loop().time()
-                if inactivity_task is None or inactivity_task.done():
-                    inactivity_task = asyncio.create_task(telephony_inactivity_monitor())
 
             elif event == "media":
                 if not stream_id:
@@ -1638,10 +1671,11 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                             if stream_id:
                                 clear_msg["streamId"] = stream_id
                             await websocket.send_text(json.dumps(clear_msg))
+                            if sm:
+                                sm.on_caller_speech_started()
                             audio_chunks = [pcm_chunk]
                             pre_speech_buffer.clear()
                             is_speech_active = True
-                            silence_prompt_active = False
                             last_speech_time = now
                             last_user_activity = now
                     else:
@@ -1655,7 +1689,8 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     if consecutive_speech >= 2:
                         if not is_speech_active:
                             is_speech_active = True
-                            silence_prompt_active = False
+                            if sm:
+                                sm.on_caller_speech_started()
                             last_user_activity = asyncio.get_running_loop().time()
                             # Prepend pre-speech buffer so initial consonants (like "H" in "Hello") are not clipped
                             audio_chunks.extend(list(pre_speech_buffer))
@@ -1686,7 +1721,12 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
             elif event in ("playedStream", "clearedAudio"):
                 agent_speaking_until = asyncio.get_running_loop().time()
-                is_playing_event.clear()
+                if is_playing_event.is_set() and audio_queue.empty():
+                    is_playing_event.clear()
+                    if sm:
+                        sm.on_agent_playback_finished()
+                else:
+                    is_playing_event.clear()
 
             elif event == "stop":
                 print(f"👋 [vobiz-ws] Stream stopped: {stream_id}")
@@ -1697,8 +1737,10 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"⚠️ [vobiz-ws] Telephony stream error: {e}")
     finally:
-        if inactivity_task and not inactivity_task.done():
-            inactivity_task.cancel()
+        if sm:
+            sm.close()
+        if playback_monitor_task and not playback_monitor_task.done():
+            playback_monitor_task.cancel()
         if call_id:
             db.log_call_end(call_id)
             try:

@@ -62,26 +62,31 @@ ABBREVIATIONS = {
 FAST_HANGUP_PATTERNS = [
     # English
     r"\b(bye|goodbye|bye[\s-]bye|good[\s-]bye)\b",
-    r"\b(hang[\s-]?up|disconnect|cut the call|end the call|end call|cut the phone|hang up the phone)\b",
+    r"\b(hang[\s-]?up(?:\s+call|\s+the\s+call)?|disconnect|cut the call|end the call|end call|cut the phone|hang up the phone)\b",
     r"\b(that['’]?s all|that is all|nothing else|no more questions)\b",
+    r"^(?:no|nope|nah|no\s+thanks|no\s+thank\s+you|nothing|not\s+really|nothing\s+else)[.!,?]?$",
     r"\b(have a (good|great|nice) day|see you later|talk to you later)\b",
     r"\b(thank you,?\s+bye|thanks,?\s+bye)\b",
     r"\b(thank you for your time)\b",
-    # Hindi & Hinglish (including 'phone cut kardo', 'phone cur kardo', etc.)
+    # Hindi & Hinglish (including 'phone cut kardo', 'call band karo', 'hang up', etc.)
     r"(अलविदा|बाय|बाय\s*बाय)",
-    r"(?:फोन|फ़ोन|फ़ोन|कॉल)\s*(?:कट|काट|रख|cur)\s*(?:कर\s*दो|करो|दो|दीजिए|kardo|karo|kar\s*do|de|do)",
-    r"\b(?:phone|call)\s*(?:cut|cur|kat|kaat|rakh|rakho|end|disconnect)\s*(?:kardo|kar\s*do|karo|do|de|rakho)\b",
+    r"(?:फोन|फ़ोन|कॉल)\s*(?:कट|काट|रख|बंद|cur)\s*(?:कर\s*दो|करो|दो|दीजिए|kardo|karo|kar\s*do|de|do)?",
+    r"\b(?:phone|call)\s*(?:cut|cur|kat|kaat|rakh|rakho|band|end|disconnect)\s*(?:kardo|kar\s*do|karo|do|de|rakho)?\b",
     r"\b(?:phone|call)\s*(?:cut|disconnect|end)\b",
-    r"(फोन\s*रख\s*दो|कॉल\s*कट\s*कर\s*दो|कॉल\s*काट\s*दो|फोन\s*काट\s*दो)",
-    r"(बस\s*इतना\s*ही|धन्यवाद[,\s]*बस|और\s*कुछ\s*नहीं|कोई\s*सवाल\s*नहीं)",
-    r"(समय\s*કે\s*लिए\s*धन्यवाद|दिन\s*शुभ\s*हो)",
+    r"(फोन\s*रख\s*दो|कॉल\s*कट\s*कर\s*दो|कॉल\s*काट\s*दो|फोन\s*काट\s*दो|कॉल\s*बंद\s*करो|फोन\s*बंद\s*करो|कॉल\s*बंद\s*कर\s*दो)",
+    r"(बस\s*इतना\s*ही|धन्यवाद[,\s]*बस|और\s*कुछ\s*नहीं|कोई\s*सवाल\s*नहीं|बस\s*यही\s*जानना\s*था)",
+    r"^(?:नहीं|ना|कुछ\s*नहीं|और\s*कुछ\s*नहीं|बस|बस\s*यही|ज़रूरत\s*नहीं|कोई\s*सवाल\s*नहीं)[.!,?]?$",
+    r"(समय\s*के\s*लिए\s*धन्यवाद|समय\s*કે\s*लिए\s*धन्यवाद|दिन\s*शुभ\s*हो)",
+    r"(हैंग\s*अप|हैंगअप)",
     # Gujarati & Gujlish
     r"(આવજો|બાય|બાય\s*બાય)",
-    r"(?:ફોન|કૉલ)\s*(?:કટ|મૂકી|કાપી)\s*(?:દો|કરો|કરી\s*દો|આપો)",
-    r"\b(?:phone|call)\s*(?:muki|kaapi|muko)\s*(?:do|de|karo|karjo)\b",
-    r"(ફોન\s*મૂકી\s*દો|કૉલ\s*કટ\s*કરો|ફોન\s*કટ\s*કરો|ફોન\s*કટ\s*કરી\s*દો)",
-    r"(બસ\s*આટલું\s*જ|આભાર[,\s]*બસ|કંઈ\s*નથી\s*પૂછવું|કોઈ\s*પ્રશ્ન\s*નથી)",
+    r"(?:ફોન|કૉલ|કોલ)\s*(?:કટ|મૂકી|કાપી|બંધ)\s*(?:દો|કરો|કરી\s*દો|આપો)?",
+    r"\b(?:phone|call)\s*(?:muki|kaapi|muko|band|cut)\s*(?:do|de|karo|karjo)?\b",
+    r"(ફોન\s*મૂકી\s*દો|કૉલ\s*કટ\s*કરો|કોલ\s*કટ\s*કરો|ફોન\s*કટ\s*કરો|ફોન\s*કટ\s*કરી\s*દો|કોલ\s*બંધ\s*કરો|કૉલ\s*બંધ\s*કરો|ફોન\s*બંધ\s*કરો)",
+    r"(બસ\s*આટલું\s*જ|આભાર[,\s]*બસ|કંઈ\s*નથી\s*પૂછવું|કોઈ\s*પ્રશ્ન\s*નથી|હવે\s*કંઈ\s*નથી)",
+    r"^(?:ના|નથી|કંઈ\s*નથી|બસ|બસ\s*આટલું\s*જ|જરૂર\s*નથી|કોઈ\s*પ્રશ્ન\s*નથી|કંઈ\s*નથી\s*પૂછવું)[.!,?]?$",
     r"(સમય\s*માટે\s*આભાર|દિવસ\s*શુભ\s*રહે)",
+    r"(હેંગ\s*અપ|હેંગઅપ)",
 ]
 
 COMPILED_HANGUP_REGEX = [re.compile(p, re.IGNORECASE) for p in FAST_HANGUP_PATTERNS]
@@ -115,9 +120,9 @@ COMPILED_AGENT_FAREWELL_REGEX = [re.compile(p, re.IGNORECASE) for p in AGENT_FAR
 
 # Standard silence check prompts when caller is inactive > 7s
 SILENCE_CHECK_PROMPTS = {
-    "gu": "શું તમે હજુ પણ લાઇન પર છો?",
-    "hi": "क्या आप अभी भी लाइन पर हैं?",
-    "en": "Are you still on the line?",
+    "gu": "શું તમે લાઇન પર છો?",
+    "hi": "क्या आप लाइन पर हैं?",
+    "en": "Are you there on the line?",
 }
 
 # Standard closing farewells when hangup requested or inactivity concludes
@@ -240,6 +245,10 @@ def is_hangup_intent(user_text: str) -> bool:
         return False
 
     clean_text = user_text.strip().lower()
+    # Telephony system events must never be treated as caller hangup intents
+    if clean_text.startswith("[system_event:"):
+        return False
+
     for regex in COMPILED_HANGUP_REGEX:
         if regex.search(clean_text):
             return True

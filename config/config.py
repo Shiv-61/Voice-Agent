@@ -83,3 +83,8 @@ CHROMA_PERSIST_DIR = os.getenv(
 # ---- Audio ----
 SAMPLE_RATE = 16000                   # Sarvam expects 16kHz for PCM
 ENABLE_ACOUSTIC_FILLER = os.getenv("ENABLE_ACOUSTIC_FILLER", "false").lower() in ("true", "1", "yes")
+
+# ---- Silence Timer & Call Disconnect Settings ----
+SILENCE_TIMEOUT_SECONDS = int(os.getenv("SILENCE_TIMEOUT_SECONDS", "8"))
+MAX_SILENCE_CHECKS = int(os.getenv("MAX_SILENCE_CHECKS", "2"))
+MAX_FAREWELL_WAIT_SECONDS = float(os.getenv("MAX_FAREWELL_WAIT_SECONDS", "5.0"))

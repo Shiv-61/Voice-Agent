@@ -7,7 +7,7 @@ for structured SQL database and unstructured RAG knowledge base.
 import asyncio
 import json
 import re
-from typing import Generator, AsyncGenerator
+from typing import Generator, AsyncGenerator, Any
 import httpx
 
 import config
@@ -207,7 +207,8 @@ _COMMON_ENGLISH_WORDS: frozenset[str] = frozenset({
     "internships", "project", "projects", "study", "learn", "teach", "teaching",
     "question", "questions", "ask", "asking", "answer", "answers", "query",
     "queries", "inform", "more", "much", "many", "good", "better", "best",
-    "time", "times"
+    "time", "times", "summarize", "summary", "subjective", "objective", "grading",
+    "policy", "policies"
 })
 
 # Words that overlap between English and Romanized Indic spellings (e.g. 'the', 'me', 'to', 'do', 'no', 'so', 'he', 'or')
@@ -693,12 +694,34 @@ class LLM:
         lines.append("[END OF CHAT HISTORY]\n")
         return "\n".join(lines)
 
+    def check_call_hangup_supervisor(self, user_text: str, agent_text: str = "") -> dict[str, Any]:
+        """
+        Supervisor evaluation matching the call_hangup_prompt schema:
+        {"call_hangup": true|false, "reason": "..."}
+        """
+        if is_agent_farewell(agent_text):
+            return {"call_hangup": True, "reason": "agent closing farewell delivered"}
+        if is_hangup_intent(user_text):
+            return {"call_hangup": True, "reason": "caller requested hangup or declined further help"}
+        return {"call_hangup": False, "reason": "conversation continuing"}
+
     def check_call_hangup(self, user_text: str, agent_text: str = "") -> bool:
         """
-        Fast zero-latency evaluation of whether caller intends to end the call,
-        or whether agent has completed the farewell: 'Thank you for your time. Have a great day!'.
+        Fast zero-latency evaluation of whether call should be disconnected.
         """
-        return is_hangup_intent(user_text) or is_agent_farewell(agent_text)
+        res = self.check_call_hangup_supervisor(user_text, agent_text)
+        return bool(res.get("call_hangup", False))
+
+    def record_silence_event(self, check_number: int, prompt_spoken: str):
+        """
+        Records a telephony system silence event into conversation history as a system event,
+        never as caller speech.
+        """
+        event_tag = f"[SYSTEM_EVENT: SILENCE_CHECK_{check_number}]"
+        self.history.append({"role": "system", "content": event_tag})
+        self.history.append({"role": "assistant", "content": prompt_spoken})
+        self._trim_history()
+
 
     def _get_provider_request(self, messages: list[dict], provider_override: str | None = None):
         """Builds URL, headers, and payload for streaming LLM calls."""
