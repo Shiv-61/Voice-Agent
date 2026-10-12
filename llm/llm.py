@@ -1187,6 +1187,33 @@ class LLM:
                     f"Do NOT call search_university_docs since verified data is already provided above.]"
                 )
                 messages[-1]["content"] += context_injection
+        # Deterministic DB Pre-fetch for Student Records (Marks / Attendance)
+        stu_match = re.search(r"\b(STU\d{1,4})\b", user_text, re.IGNORECASE)
+        if stu_match:
+            stu_id = stu_match.group(1).upper()
+            lower_u = user_text.lower()
+            is_marks = any(w in lower_u for w in ["mark", "marks", "grade", "score", "result", "પરિણામ", "માર્ક્સ", "मार्क्स", "अंक", "नंबर"])
+            is_att = any(w in lower_u for w in ["attendance", "હાજરી", "अटेंडेंस", "उपस्थिति"])
+            if is_marks:
+                marks_res = self.db.get_student_marks(stu_id)
+                if marks_res:
+                    context_injection = (
+                        f"\n\n[DETERMINISTIC DB CONTEXT: Verified official academic marks for student {stu_id}:\n"
+                        f"{json.dumps(marks_res, default=str)}\n"
+                        f"Instruction: Report the subject marks and grades for student {stu_id} concisely in {turn_lang}. "
+                        f"Do NOT call get_student_marks since verified data is already provided above.]"
+                    )
+                    messages[-1]["content"] += context_injection
+            elif is_att:
+                att_res = self.db.get_student_attendance(stu_id)
+                if att_res:
+                    context_injection = (
+                        f"\n\n[DETERMINISTIC DB CONTEXT: Verified official attendance for student {stu_id}:\n"
+                        f"{json.dumps(att_res, default=str)}\n"
+                        f"Instruction: Report the subject attendance percentages for student {stu_id} concisely in {turn_lang}. "
+                        f"Do NOT call get_student_attendance since verified data is already provided above.]"
+                    )
+                    messages[-1]["content"] += context_injection
 
         needs_hold = getattr(self, "_last_turn_needed_db_or_rag", False)
         hold_phrase = HOLD_PHRASES.get(turn_lang, HOLD_PHRASES["gu"])

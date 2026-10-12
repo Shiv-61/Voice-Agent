@@ -236,6 +236,18 @@ class Database:
                 );
             """)
 
+            cursor.execute("SELECT COUNT(*) FROM marks;")
+            marks_cnt = cursor.fetchone()[0]
+            if marks_cnt == 0:
+                schema_file = os.path.join(os.path.dirname(__file__), "schema.sql")
+                if os.path.exists(schema_file):
+                    with open(schema_file, "r", encoding="utf-8") as f:
+                        sql = f.read()
+                    if "-- Seed Data" in sql:
+                        seed_sql = sql.split("-- Seed Data", 1)[1]
+                        cursor.execute(seed_sql)
+                        print("[db] Seeded initial marks, attendance, and students into PostgreSQL.")
+
             self._migrate_call_logs_columns()
             print("[db] PostgreSQL schema and compatibility verified.")
         except Exception as err:

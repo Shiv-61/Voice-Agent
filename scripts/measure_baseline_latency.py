@@ -159,7 +159,7 @@ async def run_benchmark(num_runs: int = 3):
     test_cases = [
         ("ROUTE_A (Instant Fact)", "What is the annual fee for B.Tech Computer Science?"),
         ("RAG (Syllabus Doc)", "What subjects are taught in B.Tech IT Semester 3?"),
-        ("DB (Student Records)", "What are the marks for student STU001?"),
+        ("DB (Student Records)", "What are the marks for student STU101?"),
     ]
 
     results = []
