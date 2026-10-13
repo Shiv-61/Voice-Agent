@@ -263,16 +263,44 @@ class Database:
             sql_script = sql_script.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
             sql_script = sql_script.replace("ON CONFLICT DO NOTHING", "")
             sql_script = sql_script.replace("INSERT INTO", "INSERT OR IGNORE INTO")
+            # Strip PostgreSQL extensions (e.g. CREATE EXTENSION IF NOT EXISTS vector;)
+            sql_script = re.sub(r"CREATE\s+EXTENSION\b[^;]*;?", "", sql_script, flags=re.IGNORECASE)
+            # Strip PostgreSQL custom index methods (e.g. USING hnsw / gin / gist)
+            sql_script = re.sub(r"CREATE\s+INDEX\b[^;]*USING\s+[^;]*;?", "", sql_script, flags=re.IGNORECASE)
+
             cursor = self.conn.cursor()
             # Always ensure tables exist; seed rows only on a fresh (empty) DB.
             if "-- Seed Data" in sql_script:
                 schema_part, seed_part = sql_script.split("-- Seed Data", 1)
             else:
                 schema_part, seed_part = sql_script, ""
-            cursor.executescript(schema_part)
+
+            try:
+                cursor.executescript(schema_part)
+            except Exception as e:
+                print(f"[db] SQLite executescript batch notice: {e}. Executing statements individually...")
+                for stmt in schema_part.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        try:
+                            cursor.execute(stmt)
+                        except Exception as se:
+                            print(f"[db] SQLite skipped statement: {se}")
+
             student_count = cursor.execute("SELECT COUNT(*) FROM students").fetchone()[0]
             if seed_part and student_count == 0:
-                cursor.executescript(seed_part)
+                try:
+                    cursor.executescript(seed_part)
+                except Exception as e:
+                    print(f"[db] SQLite seed batch notice: {e}. Executing seed statements individually...")
+                    for stmt in seed_part.split(";"):
+                        stmt = stmt.strip()
+                        if stmt:
+                            try:
+                                cursor.execute(stmt)
+                            except Exception as se:
+                                print(f"[db] SQLite skipped seed statement: {se}")
+
             self.conn.commit()
             self._migrate_call_logs_columns()
 
