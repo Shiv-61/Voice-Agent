@@ -1140,12 +1140,34 @@ async def primary_answer_endpoint(request: Request):
         except Exception as db_err:
             print(f"[answer-webhook] DB log notice: {db_err}")
 
-    host = request.headers.get("host", f"localhost:{config.WS_PORT}")
+    req_host = request.headers.get("host", f"13.55.193.203:{config.WS_PORT}")
     fwd_proto = request.headers.get("x-forwarded-proto", "").lower()
-    proto = "wss" if fwd_proto == "https" or "render.com" in host or request.url.scheme == "https" else "ws"
-    ws_url = f"{proto}://{host}/ws/vobiz"
-    status_proto = "https" if proto == "wss" else "http"
-    hangup_callback_url = f"{status_proto}://{host}/api/vobiz/hangup"
+
+    # Determine scheme and host
+    # For 13.55.193.203, strictly use unencrypted ws:// and http:// because CPaaS providers fail TLS on raw IPs
+    public_base = getattr(config, "PUBLIC_BASE_URL", "")
+    is_ec2_ip = "13.55.193.203" in req_host or "13.55.193.203" in public_base
+    is_render = "render.com" in req_host or "render.com" in public_base
+
+    if is_ec2_ip:
+        proto = "ws"
+        status_proto = "http"
+        if ":" in req_host:
+            target_host = req_host
+        else:
+            target_host = f"{req_host}:{config.WS_PORT}"
+    elif is_render or fwd_proto == "https" or request.url.scheme == "https":
+        proto = "wss"
+        status_proto = "https"
+        target_host = req_host
+    else:
+        proto = "ws"
+        status_proto = "http"
+        target_host = req_host
+
+    ws_url = f"{proto}://{target_host}/ws/vobiz"
+    hangup_callback_url = f"{status_proto}://{target_host}/api/vobiz/hangup"
+    stream_status_url = f"{status_proto}://{target_host}/api/vobiz/stream-status"
 
     # Support both audio/x-mulaw;rate=8000 (standard Vobiz telephony default) and audio/x-l16;rate=16000
     requested_fmt = request.query_params.get("format", "").lower()
@@ -1154,13 +1176,46 @@ async def primary_answer_endpoint(request: Request):
     else:
         content_type_attr = 'contentType="audio/x-mulaw;rate=8000"'
 
+    # In Vobiz Voice XML:
+    # 1. url="..." attribute is expected by Vobiz & Twilio
+    # 2. Text node {ws_url} is expected by Plivo
+    # 3. streamTimeout="86400" and keepCallAlive="true" prevent premature closure
+    # 4. <Wait length="3600"/> keeps the telephony session active during bidirectional audio streaming
     xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream bidirectional="true" keepCallAlive="true" {content_type_attr} statusCallbackUrl="{hangup_callback_url}" statusCallbackMethod="POST">
+  <Stream url="{ws_url}" bidirectional="true" keepCallAlive="true" streamTimeout="86400" audioTrack="inbound" {content_type_attr} statusCallbackUrl="{stream_status_url}" statusCallbackMethod="POST">
     {ws_url}
   </Stream>
+  <Wait length="3600"/>
+  <Hangup/>
 </Response>"""
     return Response(content=xml_content, media_type="application/xml")
+
+
+@app.api_route("/api/vobiz/stream-status", methods=["GET", "POST"])
+@app.api_route("/api/telephony/stream-status", methods=["GET", "POST"])
+async def stream_status_endpoint(request: Request):
+    """
+    Stream status callback webhook.
+    Acknowledges stream lifecycle events (started, connected, stopped)
+    without prematurely marking the call as ended.
+    """
+    try:
+        content_type = request.headers.get("content-type", "").lower()
+        if "form" in content_type:
+            form = await request.form()
+            data = dict(form)
+        elif "json" in content_type:
+            data = await request.json()
+        else:
+            data = dict(request.query_params)
+        stream_id = data.get("StreamSid") or data.get("streamId") or data.get("stream_id") or ""
+        call_uuid = data.get("CallUUID") or data.get("call_uuid") or data.get("CallSid") or ""
+        event_name = data.get("event") or data.get("Status") or data.get("status") or "status_update"
+        print(f"📡 [telephony-stream] Stream status callback: CallUUID={call_uuid}, StreamID={stream_id}, Event={event_name}")
+    except Exception as e:
+        print(f"[telephony-stream] Notice parsing stream status: {e}")
+    return JSONResponse(status_code=200, content={"status": "acknowledged"})
 
 
 @app.api_route("/api/vobiz/hangup", methods=["GET", "POST"])
@@ -1195,7 +1250,10 @@ async def hangup_endpoint(request: Request):
             duration = int(duration_raw)
         except (ValueError, TypeError):
             duration = 0
-        hangup_cause = form_data.get("HangupCause") or form_data.get("hangup_cause") or form_data.get("reason") or "normal_clearing"
+        call_status = (form_data.get("CallStatus") or form_data.get("call_status") or form_data.get("status") or "").lower()
+        if call_status in ("ringing", "in-progress", "queued"):
+            print(f"📞 [telephony-hangup] Ignoring intermediate status callback ({call_status}) for UUID={call_uuid}")
+            return JSONResponse(status_code=200, content={"status": "in-progress", "call_id": call_uuid})
     except Exception as parse_err:
         print(f"[hangup-webhook] Notice parsing hangup payload: {parse_err}")
 
@@ -1418,6 +1476,7 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                     b64_payload = base64.b64encode(chunk).decode("utf-8")
                     msg = {
                         "event": "playAudio",
+                        "streamId": stream_id or "",
                         "media": {
                             "contentType": out_content_type,
                             "sampleRate": out_sample_rate,
@@ -1428,10 +1487,13 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
                         msg["streamId"] = stream_id
                     await websocket.send_text(json.dumps(msg))
                     num_chunks += 1
+                    if num_chunks % 15 == 0:
+                        await asyncio.sleep(0.001)  # Yield to event loop for concurrent network processing
 
                 # Send checkpoint event so Vobiz acknowledges when audio has fully played
                 checkpoint_msg = {
                     "event": "checkpoint",
+                    "streamId": stream_id or "",
                     "name": f"turn_complete_{int(time.time() * 1000)}",
                 }
                 if stream_id:
@@ -1541,11 +1603,33 @@ async def websocket_vobiz_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            raw_msg = await websocket.receive_text()
-            data = json.loads(raw_msg)
+            msg_packet = await websocket.receive()
+            if "text" in msg_packet and msg_packet["text"]:
+                raw_msg = msg_packet["text"]
+            elif "bytes" in msg_packet:
+                continue
+            else:
+                continue
+
+            try:
+                data = json.loads(raw_msg)
+            except Exception:
+                continue
             event = data.get("event")
 
-            if event == "start":
+            if event in ("start", "connected"):
+                if sm is not None:
+                    # Session already active, update streamId if missing
+                    new_stream_id = (
+                        data.get("streamId")
+                        or data.get("stream_id")
+                        or data.get("streamSid")
+                        or ""
+                    )
+                    if new_stream_id and not stream_id:
+                        stream_id = new_stream_id
+                    continue
+
                 start_obj = data.get("start", {}) if isinstance(data.get("start"), dict) else {}
                 stream_obj = data.get("stream", {}) if isinstance(data.get("stream"), dict) else {}
                 stream_id = (

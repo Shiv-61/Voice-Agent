@@ -73,6 +73,8 @@ MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "voice_agent")
 WS_HOST = os.getenv("HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("PORT", "8765"))
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+# Public Telephony Base URL (defaulting to http://13.55.193.203:8765 for AWS instance)
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", os.getenv("PUBLIC_URL", "http://13.55.193.203:8765"))
 
 # ---- ChromaDB Vector Store ----
 CHROMA_PERSIST_DIR = os.getenv(
